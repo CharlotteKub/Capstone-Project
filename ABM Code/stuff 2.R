@@ -121,7 +121,7 @@ parties <- unique(geo_nc_2755_test$party_cd)
 # Initialize probability columns for each party
 for (party in parties) {
   if(party != "UNA"){
-  geo_nc_2755_test[[paste0(party, "_prob")]] <- 0
+    geo_nc_2755_test[[paste0(party, "_prob")]] <- 0
   }
 }
 
@@ -146,12 +146,12 @@ beta <- 0.1
 alpha <- 0.1
 
 
-  # Calculate Kronecker delta for party difference
-  party_diff <- ifelse(geo_nc_2755_test$party_cd[1] == geo_nc_2755_test$party_cd[6], 0, 1)
-  
-  if(geo_nc_2755_test$party_cd[6] == "UNA") {
-    delta_P <- 0
-  } else {
+# Calculate Kronecker delta for party difference
+party_diff <- ifelse(geo_nc_2755_test$party_cd[1] == geo_nc_2755_test$party_cd[6], 0, 1)
+
+if(geo_nc_2755_test$party_cd[6] == "UNA") {
+  delta_P <- 0
+} else {
   
   # Calculate the number of shared sociodemographic attributes
   shared_attributes <- sum(
@@ -170,57 +170,194 @@ alpha <- 0.1
     # Same party: increase probability
     delta_P <- beta * influence_weight
   }
-  }
-  
-    # Update the voting probability
-  # Get the party columns to update
-  ego_party_col <- paste0(geo_nc_2755_test$party_cd[1], "_prob")
-  alter_party_col <- paste0(geo_nc_2755_test$party_cd[6], "_prob")
-  
-  # Update the voting probability
-  geo_nc_2755_test[[ego_party_col]][1] <- sigmoid(geo_nc_2755_test[[ego_party_col]][1] + delta_P)
-  geo_nc_2755_test[[alter_party_col]][1] <- sigmoid(geo_nc_2755_test[[alter_party_col]][1] - delta_P)
-  
-  # Ensure the probability stays within bounds [0, 1]
-  # geo_nc_2755_test[[ego_party_col]][1] <- max(0, min(1, geo_nc_2755_test[[ego_party_col]][1]))
-  # geo_nc_2755_test[[alter_party_col]][1] <- max(0, min(1, geo_nc_2755_test[[alter_party_col]][1]))
+}
+
+# Update the voting probability
+# Get the party columns to update
+ego_party_col <- paste0(geo_nc_2755_test$party_cd[1], "_prob")
+alter_party_col <- paste0(geo_nc_2755_test$party_cd[6], "_prob")
+
+# Update the voting probability
+geo_nc_2755_test[[ego_party_col]][1] <- sigmoid(geo_nc_2755_test[[ego_party_col]][1] + delta_P)
+geo_nc_2755_test[[alter_party_col]][1] <- sigmoid(geo_nc_2755_test[[alter_party_col]][1] - delta_P)
+
+# Ensure the probability stays within bounds [0, 1]
+# geo_nc_2755_test[[ego_party_col]][1] <- max(0, min(1, geo_nc_2755_test[[ego_party_col]][1]))
+# geo_nc_2755_test[[alter_party_col]][1] <- max(0, min(1, geo_nc_2755_test[[alter_party_col]][1]))
 
 
 
 #######
-  
-  sigmoid <- function(x) {
-    return(1 / (1 + exp(-x)))
-  }
 
-  
-  
+sigmoid <- function(x) {
+  return(1 / (1 + exp(-x)))
+}
+
+
+
 
 ####################################
 
+ego_test = 1
+alter_test = 2
+
+
+agents_test <- geo_nc_2755_test
+
 ### interaction probability:
+
+# Randomly assign the number of interactions for this agent for this day
+num_interactions_test <- sample(0:5, 1)
+for (interaction in 1:num_interactions_test) {
+  # Filter agents within the proximity threshold
+  potential_alters_test <- which(proxmat1[ego_test, ] > proximity_threshold & proxmat1[ego_test, ] < 1)
   
-  # Randomly assign the number of interactions for this agent for this day
-  num_interactions <- sample(0:5, 1)
-  for (interaction in 1:num_interactions) {
-    # Filter agents within the proximity threshold
-    potential_alters <- which(proximity_matrix[ego, ] > proximity_threshold & proximity_matrix[ego, ] < 1)
+  if (length(potential_alters_test) > 0) {
+    alter <- sample(potential_alters_test, 1)  # Randomly select one of the agents within proximity
     
-    if (length(potential_alters) > 0) {
-      alter <- sample(potential_alters, 1)  # Randomly select one of the agents within proximity
+    if (ego_test != alter) {  # Ensure ego does not interact with itself
+      # Interaction probability based on proximity
+      interaction_prob_test <- proxmat1[ego_test, alter]
       
-      if (ego != alter) {  # Ensure ego does not interact with itself
-        # Interaction probability based on proximity
-        interaction_prob <- proximity_matrix[ego, alter]
+      # Random interaction based on the calculated probability
+      if (runif(1) < interaction_prob_test) {
         
-        # Random interaction based on the calculated probability
-        if (runif(1) < interaction_prob) {
-          # Calculate Kronecker delta for party difference
+        
+        # Calculate Kronecker delta for party difference
+        
+        party_diff <- ifelse(agents_test$party_cd[ego_test] == agents_test$party_cd[alter_test], 0, 1)
+
+        if (agents_test$party_cd[alter_test] == "UNA") {
+          delta_P <- 0
+        } else {
+          # Calculate the number of shared sociodemographic attributes
+          shared_attributes <- sum(
+            agents_test$age_binned[ego_test] == agents_test$age_binned[alter_test], 
+            agents_test$race_code[ego_test] == agents_test$race_code[alter_test], 
+            agents_test$gender_code[ego_test] == agents_test$gender_code[alter_test]
+          )
+          
+          influence_weight <- sigmoid(shared_attributes / total_attributes)
+          
+          # Calculate the change in probability based on party difference
+          if (party_diff == 1) {
+            # Different party: decrease probability
+            delta_P <- -alpha * influence_weight
+            
+            ego_party_col <- paste0(agents_test$party_cd[ego_test], "_prob")
+            alter_party_col <- paste0(agents_test$party_cd[alter_test], "_prob")
+            
+            # Update the voting probability for ego
+            agents_test[[ego_party_col]][ego_test] <- sigmoid(logit(agents_test[[ego_party_col]][ego_test]) + delta_P)
+            agents_test[[alter_party_col]][ego_test] <- agents_test[[alter_party_col]][ego_test] - delta_P
+            
+            
+            # Update the voting probability for alter
+            agents_test[[ego_party_col]][alter_test] <- agents_test[[ego_party_col]][alter_test] - delta_P
+            agents_test[[alter_party_col]][alter_test] <- sigmoid(logit(agents_test[[alter_party_col]][alter_test]) + delta_P)
+            
+            
+          } else {
+            # Same party: increase probability
+            delta_P <- beta * influence_weight
+            
+            ego_party_col <- paste0(agents_test$party_cd[ego_test], "_prob")
+            alter_party_col <- paste0(agents_test$party_cd[alter_test], "_prob")
+            
+            # Update the voting probability for ego
+            agents_test[[ego_party_col]][ego_test] <- sigmoid(logit(agents_test[[ego_party_col]][ego_test]) + delta_P)
+            
+            # Update the voting probability for alter
+            agents_test[[alter_party_col]][alter_test] <- sigmoid(logit(agents_test[[alter_party_col]][alter_test]) + delta_P)
+            
+          }
+        }
+      }
+    }
+  }
+}
+
+
+median(proxmat1)
+
+sigmoid(logit(agents_test[[ego_party_col]][ego_test]) + delta_P)
+
+scaled_tanh <- function(x) {
+  0.5 * (tanh(x) + 1)
+}
+
+
+sigmoid(1 + 0.05825702)
+
+
+
+
+
+
 
 ###########################################
+
+
+    num_interactions_test <- sample(0:5, 1)
+    for (interaction in 1:num_interactions_test) {
+      # Filter agents within the proximity threshold
+      potential_alters_test <- which(proxmat1[ego_test, ] > proximity_threshold & proxmat1[ego_test, ] < 1)
+      
+      if (length(potential_alters_test) > 0) {
+        alter <- sample(potential_alters_test, 1)  # Randomly select one of the agents within proximity
+        
+        if (ego_test != alter) {  # Ensure ego does not interact with itself
+          # Interaction probability based on proximity
+          interaction_prob_test <- proxmat1[ego_test, alter]
           
-          
-          
-          
-          
-          
+          # Random interaction based on the calculated probability
+          if (runif(1) < interaction_prob_test) {
+            # Calculate Kronecker delta for party difference
+            party_diff <- ifelse(agents_test$party_cd[ego_test] == agents_test$party_cd[alter], 0, 1)
+            
+            if (agents_test$party_cd[alter] == "UNA") {
+              delta_P <- 0
+            } else {
+              # Calculate the number of shared sociodemographic attributes
+              shared_attributes <- sum(
+                agents_test$age_binned[ego_test] == agents_test$age_binned[alter], 
+                agents_test$race_code[ego_test] == agents_test$race_code[alter], 
+                agents_test$gender_code[ego_test] == agents_test$gender_code[alter]
+              )
+              
+              influence_weight <- shared_attributes / total_attributes
+              
+              # Calculate the change in probability based on party difference
+              if (party_diff == 1) {
+                # Different party: decrease probability
+                delta_P <- -alpha * influence_weight
+                
+                ego_party_col <- paste0(agents_test$party_cd[ego_test], "_prob")
+                alter_party_col <- paste0(agents_test$party_cd[alter], "_prob")
+                
+                # Update the voting probability for ego
+                agents_test[[ego_party_col]][ego_test] <- sigmoid(agents_test[[ego_party_col]][ego_test] + delta_P)
+                agents_test[[alter_party_col]][ego_test] <- sigmoid(aagents_testgents[[alter_party_col]][ego_test] - delta_P)
+                
+                # Update the voting probability for alter
+                agents_test[[ego_party_col]][alter] <- sigmoid(agents_test[[ego_party_col]][alter] - delta_P)
+                agents_test[[alter_party_col]][alter] <- sigmoid(agents_test[[alter_party_col]][alter] + delta_P)
+                
+              } else {
+                # Same party: increase probability
+                delta_P <- beta * influence_weight
+
+                ego_party_col <- paste0(agents_test$party_cd[ego_test], "_prob")
+                alter_party_col <- paste0(agents_test$party_cd[alter], "_prob")
+                
+                # Update the voting probability for ego
+                agents_test[[ego_party_col]][ego_test] <- sigmoid(agents_test[[ego_party_col]][ego_test] + delta_P)
+                # Update the voting probability for alter
+                agents_test[[alter_party_col]][alter] <- sigmoid(agents_test[[alter_party_col]][alter] + delta_P)
+
+              }
+            }
+          }
+        }
+      }
+    }

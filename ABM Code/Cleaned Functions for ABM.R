@@ -638,7 +638,7 @@ parties <- unique(geo_nc_2755_test$party_cd)
 # Initialize probability columns for each party
 for (party in parties) {
   if(party != "UNA"){
-    geo_nc_2755_test[[paste0(party, "_prob")]] <- 0
+    geo_nc_2755_test[[paste0(party, "_prob")]] <- sigmoid(0)
   }
   else {
     geo_nc_2755_test[[paste0(party, "_prob")]] <-NA
@@ -650,21 +650,31 @@ for (i in 1:nrow(geo_nc_2755_test)) {
   current_party <- geo_nc_2755_test$party_cd[i]
   if (current_party == "UNA") {
     for (party in parties) {
-      geo_nc_2755_test[[paste0(party, "_prob")]][i] <- 0.5
+      geo_nc_2755_test[[paste0(party, "_prob")]][i] <- sigmoid(0.5)
     }
   } else {
-    geo_nc_2755_test[[paste0(current_party, "_prob")]][i] <- 1
+    geo_nc_2755_test[[paste0(current_party, "_prob")]][i] <- sigmoid(1)
   }
 }
 
 
+
+
+#################################-------------------------
 ######### Vote Preference Update #############
+#################################-------------------------
 
 
-updateVoteProbability <- function(agents, proximity_matrix, alpha, beta, total_attributes, interaction_prob = 0.5) {
+
+################# Version 1 ######################
+
+updateVoteProbability <- function(agents, proximity_matrix, alpha, beta, total_attributes, interaction_prob, epochs) {
+  
+  # create dataframe for interactions 
+  interactions <- data.frame(epoch = integer(),agent = integer(), party = character(), vote_prob = numeric())
   
   num_agents <- nrow(agents)
-  
+  for (epoch in 1:epochs) {
   for (ego in 1:num_agents) {
     for (alter in 1:num_agents) {
       
@@ -698,12 +708,12 @@ updateVoteProbability <- function(agents, proximity_matrix, alpha, beta, total_a
             alter_party_col <- paste0(agents$party_cd[alter], "_prob")
             
             # Update the voting probability for ego
-            agents[[ego_party_col]][ego] <- agents[[ego_party_col]][ego] + delta_P
-            agents[[alter_party_col]][ego] <- agents[[alter_party_col]][ego] - delta_P
+            agents[[ego_party_col]][ego] <- sigmoid(agents[[ego_party_col]][ego] + delta_P)
+            agents[[alter_party_col]][ego] <- sigmoid(agents[[alter_party_col]][ego] - delta_P)
             
             # Update the voting probability for alter
-            agents[[ego_party_col]][alter] <- agents[[ego_party_col]][alter] - delta_P
-            agents[[alter_party_col]][alter] <- agents[[alter_party_col]][alter] + delta_P
+            agents[[ego_party_col]][alter] <- sigmoid(agents[[ego_party_col]][alter] - delta_P)
+            agents[[alter_party_col]][alter] <- sigmoid(agents[[alter_party_col]][alter] + delta_P)
             
             
           } else {
@@ -716,41 +726,69 @@ updateVoteProbability <- function(agents, proximity_matrix, alpha, beta, total_a
             alter_party_col <- paste0(agents$party_cd[alter], "_prob")
             
             # Update the voting probability
-            agents[[ego_party_col]][ego] <- agents[[ego_party_col]][ego] + delta_P
+            agents[[ego_party_col]][ego] <- sigmoid(agents[[ego_party_col]][ego] + delta_P)
             # Update the voting probability for alter
-            agents[[ego_party_col]][alter] <- agents[[ego_party_col]][alter] + delta_P
+            agents[[ego_party_col]][alter] <- sigmoid(agents[[ego_party_col]][alter] + delta_P)
           }
         }
       }
     }
   }
-  return(agents)
+        # Log voting probabilities after each epoch
+        for (agent in 1:num_agents) {
+          party_prob_cols <- grep("_prob$", colnames(agents), value = TRUE)
+          for (party_col in party_prob_cols) {
+            interactions <- rbind(interactions, data.frame(
+              epoch = epoch,
+              agent = agent,
+              party = gsub("_prob", "", party_col),
+              vote_prob = agents[[party_col]][agent]
+           ))
+        }
+      }
+    }
+    return(interactions)
 }
 
 
-updateVoteProbability(geo_nc_2755_test, proxmat1, 0.1, 0.05, 3)
+interactions <- updateVoteProbability(geo_nc_2755_test, proxmat1, 0.1, 0.05, 3, 0.5, 100)
 
 
+
+ggplot(interactions, aes(x = epoch, y = vote_prob, color = agent, group = agent)) +
+  geom_line(alpha = 0.5) +
+  labs(title = "Change in Voting Probabilities over Epochs",
+       x = "Epoch",
+       y = "Voting Probability") +
+  facet_wrap(~party)+
+  theme_minimal()
 
 save(geo_nc_2755_test, file = "geo_nc_2755_test.RData")
 
 
+
+
 ########################################------------------------------------
 
-### TEST with plotting interactions of agents
 
+load("~/Desktop/LSE Term 2/Capstone-Project/Data/NC Voter Registration Data/geo_nc_2755_test.RData")
+
+
+################# Version 2 ######################
+
+# we want to actually limit the number of interactions per day 
+
+### TEST with plotting interactions of agents
 #### randomizing interaction agents by proximity 
 
-
-updateVoteProbability <- function(agents, proximity_matrix, alpha, beta, total_attributes, epochs) {
+updateVoteProbability2 <- function(agents, proximity_matrix, alpha, beta, total_attributes, epochs) {
   
-  # initialize list with number of agents 
   num_agents <- nrow(agents)
   
-  # create dataframe for interactions 
-  interactions <- data.frame(epoch = integer(), agent = integer(), party = character(), vote_prob = numeric())
+  # Create a dataframe for interactions and logging
+  interactions <- data.frame(epoch = integer(), agent = integer(), alter = integer(), party = character(), vote_prob = numeric(), delta_P = numeric())
+  interactions_epoch <- data.frame(epoch = integer(), agent = integer(), party = character(), vote_prob = numeric())
   
-  # 3 times nested loop iterating over epochs first and then over i and j from num_agents list 
   for (epoch in 1:epochs) {
     for (ego in 1:num_agents) {
       for (alter in 1:num_agents) {
@@ -781,18 +819,16 @@ updateVoteProbability <- function(agents, proximity_matrix, alpha, beta, total_a
                 # Different party: decrease probability
                 delta_P <- -alpha * influence_weight
                 
-                
                 ego_party_col <- paste0(agents$party_cd[ego], "_prob")
                 alter_party_col <- paste0(agents$party_cd[alter], "_prob")
                 
                 # Update the voting probability for ego
-                agents[[ego_party_col]][ego] <- sigmoid(logit(agents[[ego_party_col]][ego]) + delta_P)
-                agents[[alter_party_col]][ego] <- agents[[alter_party_col]][ego] - delta_P
-                
+                agents[[ego_party_col]][ego] <- sigmoid(agents[[ego_party_col]][ego] + delta_P)
+                agents[[alter_party_col]][ego] <- sigmoid(agents[[alter_party_col]][ego] - delta_P)
                 
                 # Update the voting probability for alter
-                agents[[ego_party_col]][alter] <- agents[[ego_party_col]][alter] - delta_P
-                agents[[alter_party_col]][alter] <- sigmoid(logit(agents[[alter_party_col]][alter]) + delta_P)
+                agents[[ego_party_col]][alter] <- sigmoid(agents[[ego_party_col]][alter] - delta_P)
+                agents[[alter_party_col]][alter] <- sigmoid(agents[[alter_party_col]][alter] + delta_P)
                 
               } else {
                 # Same party: increase probability
@@ -802,11 +838,21 @@ updateVoteProbability <- function(agents, proximity_matrix, alpha, beta, total_a
                 alter_party_col <- paste0(agents$party_cd[alter], "_prob")
                 
                 # Update the voting probability for ego
-                agents[[ego_party_col]][ego] <- sigmoid(logit(agents[[ego_party_col]][ego]) + delta_P)
+                agents[[ego_party_col]][ego] <- sigmoid(agents[[ego_party_col]][ego] + delta_P)
                 # Update the voting probability for alter
-                agents[[alter_party_col]][alter] <- sigmoid(logit(agents[[alter_party_col]][alter]) + delta_P)
+                agents[[alter_party_col]][alter] <- sigmoid(agents[[alter_party_col]][alter] + delta_P)
               }
             }
+            
+            # Record this interaction
+            interactions <- rbind(interactions, data.frame(
+              epoch = epoch,
+              agent = ego,
+              alter = alter,
+              party = agents$party_cd[ego],
+              vote_prob = agents[[paste0(agents$party_cd[ego], "_prob")]][ego],
+              delta_P = delta_P
+            ))
           }
         }
       }
@@ -816,7 +862,7 @@ updateVoteProbability <- function(agents, proximity_matrix, alpha, beta, total_a
     for (agent in 1:num_agents) {
       party_prob_cols <- grep("_prob$", colnames(agents), value = TRUE)
       for (party_col in party_prob_cols) {
-        interactions <- rbind(interactions, data.frame(
+        interactions_epoch <- rbind(interactions_epoch, data.frame(
           epoch = epoch,
           agent = agent,
           party = gsub("_prob", "", party_col),
@@ -826,21 +872,28 @@ updateVoteProbability <- function(agents, proximity_matrix, alpha, beta, total_a
     }
   }
   
-  return(interactions)
+  return(list(interactions = interactions, interactions_epoch = interactions_epoch))
 }
 
-# Example usage:
+
+
+
+################## Example usage:
+
 # Assuming geo_nc_2755_test is my data frame and proximity_matrix is defined
+
 total_attributes <- 3 # Number of sociodemographic attributes considered
 alpha <- 0.1 # Base influence factor for different parties
 beta <- 0.1 # Base influence factor for same party
 interaction_prob <- 0.5 # Probability of interaction within proximity
-epochs <- 10 # Number of epochs
+epochs <- 2 # Number of epochs
 
 # Update probabilities based on proximity and interactions over multiple epochs
-interactions <- updateVoteProbability(geo_nc_2755_test, proxmat1, alpha, beta, total_attributes, epochs)
+interactions <- updateVoteProbability2(geo_nc_2755_test, proxmat1, alpha, beta, total_attributes, epochs)
 
-# Plot the results
+################# Plot the results
+
+library(ggplot2)
 ggplot(interactions, aes(x = epoch, y = vote_prob, color = agent, group = agent)) +
   geom_line(alpha = 0.5) +
   labs(title = "Change in Voting Probabilities over Epochs",
@@ -858,10 +911,17 @@ max(interactions_na$vote_prob)
 ##########################################-----------------------------------------------
 
 # Update voting probability function with proximity-based interactions
+### this works now 
 
-updateVoteProbability_random <- function(agents, proximity_matrix, alpha, beta, total_attributes, epochs, proximity_threshold) {
+################# Version 3 ######################
+
+updateVoteProbability_3 <- function(agents, proximity_matrix, alpha, beta, total_attributes, epochs, proximity_threshold) {
+  
   num_agents <- nrow(agents)
-  interactions <- data.frame(epoch = integer(), agent = integer(), party = character(), vote_prob = numeric())
+  
+  # Create a dataframe for interactions and logging
+  interactions <- data.frame(epoch = integer(), agent = integer(), alter = integer(), party = character(), vote_prob = numeric(), delta_P = numeric())
+  interactions_epoch <- data.frame(epoch = integer(), agent = integer(), party = character(), vote_prob = numeric())
   
   for (epoch in 1:epochs) {
     for (ego in 1:num_agents) {
@@ -878,57 +938,60 @@ updateVoteProbability_random <- function(agents, proximity_matrix, alpha, beta, 
             # Interaction probability based on proximity
             interaction_prob <- proximity_matrix[ego, alter]
             
-            # Random interaction based on the calculated probability
-            if (runif(1) < interaction_prob) {
-              # Calculate Kronecker delta for party difference
-              party_diff <- ifelse(agents$party_cd[ego] == agents$party_cd[alter], 0, 1)
+            # Calculate Kronecker delta for party difference
+            party_diff <- ifelse(agents$party_cd[ego] == agents$party_cd[alter], 0, 1)
+            
+            if (agents$party_cd[alter] == "UNA") {
+              delta_P <- 0
+            } else {
+              # Calculate the number of shared sociodemographic attributes
+              shared_attributes <- sum(
+                agents$age_binned[ego] == agents$age_binned[alter], 
+                agents$race_code[ego] == agents$race_code[alter], 
+                agents$gender_code[ego] == agents$gender_code[alter]
+              )
               
-              if (agents$party_cd[alter] == "UNA") {
-                delta_P <- 0
+              influence_weight <- sigmoid(shared_attributes / total_attributes)
+              
+              # Calculate the change in probability based on party difference
+              if (party_diff == 1) {
+                # Different party: decrease probability
+                delta_P <- -alpha * influence_weight
+                
+                ego_party_col <- paste0(agents$party_cd[ego], "_prob")
+                alter_party_col <- paste0(agents$party_cd[alter], "_prob")
+                
+                # Update the voting probability for ego
+                agents[[ego_party_col]][ego] <- sigmoid(agents[[ego_party_col]][ego] + delta_P)
+                agents[[alter_party_col]][ego] <- sigmoid(agents[[alter_party_col]][ego] - delta_P)
+                
+                # Update the voting probability for alter
+                agents[[ego_party_col]][alter] <- sigmoid(agents[[ego_party_col]][alter] - delta_P)
+                agents[[alter_party_col]][alter] <- sigmoid(agents[[alter_party_col]][alter] + delta_P)
+                
               } else {
-                # Calculate the number of shared sociodemographic attributes
-                shared_attributes <- sum(
-                  agents$age_binned[ego] == agents$age_binned[alter], 
-                  agents$race_code[ego] == agents$race_code[alter], 
-                  agents$gender_code[ego] == agents$gender_code[alter]
-                )
+                # Same party: increase probability
+                delta_P <- beta * influence_weight
                 
-                influence_weight <- sigmoid(shared_attributes / total_attributes)
+                ego_party_col <- paste0(agents$party_cd[ego], "_prob")
+                alter_party_col <- paste0(agents$party_cd[alter], "_prob")
                 
-                # Calculate the change in probability based on party difference
-                if (party_diff == 1) {
-                  # Different party: decrease probability
-                  delta_P <- -alpha * influence_weight
-                  
-                  ego_party_col <- paste0(agents$party_cd[ego], "_prob")
-                  alter_party_col <- paste0(agents$party_cd[alter], "_prob")
-                  
-                  # Update the voting probability for ego
-                  agents[[ego_party_col]][ego] <- agents[[ego_party_col]][ego] + delta_P
-                  agents[[alter_party_col]][ego] <- agents[[alter_party_col]][ego] - delta_P
-                  
-                  
-                  # Update the voting probability for alter
-                  agents[[ego_party_col]][alter] <- agents[[ego_party_col]][alter] - delta_P
-                  agents[[alter_party_col]][alter] <- agents[[alter_party_col]][alter] + delta_P
-                  
-                  
-                } else {
-                  # Same party: increase probability
-                  delta_P <- beta * influence_weight
-                  
-                  ego_party_col <- paste0(agents$party_cd[ego], "_prob")
-                  alter_party_col <- paste0(agents$party_cd[alter], "_prob")
-                  
-                  # Update the voting probability for ego
-                  agents[[ego_party_col]][ego] <- agents[[ego_party_col]][ego] + delta_P
-                  
-                  # Update the voting probability for alter
-                  agents[[alter_party_col]][alter] <- agents[[alter_party_col]][alter] + delta_P
-                  
-                }
+                # Update the voting probability for ego
+                agents[[ego_party_col]][ego] <- sigmoid(agents[[ego_party_col]][ego] + delta_P)
+                # Update the voting probability for alter
+                agents[[alter_party_col]][alter] <- sigmoid(agents[[alter_party_col]][alter] + delta_P)
               }
             }
+            
+            # Record this interaction
+            interactions <- rbind(interactions, data.frame(
+              epoch = epoch,
+              agent = ego,
+              alter = alter,
+              party = agents$party_cd[ego],
+              vote_prob = agents[[paste0(agents$party_cd[ego], "_prob")]][ego],
+              delta_P = delta_P
+            ))
           }
         }
       }
@@ -938,7 +1001,7 @@ updateVoteProbability_random <- function(agents, proximity_matrix, alpha, beta, 
     for (agent in 1:num_agents) {
       party_prob_cols <- grep("_prob$", colnames(agents), value = TRUE)
       for (party_col in party_prob_cols) {
-        interactions <- rbind(interactions, data.frame(
+        interactions_epoch <- rbind(interactions_epoch, data.frame(
           epoch = epoch,
           agent = agent,
           party = gsub("_prob", "", party_col),
@@ -948,21 +1011,131 @@ updateVoteProbability_random <- function(agents, proximity_matrix, alpha, beta, 
     }
   }
   
-  return(interactions)
+  return(list(interactions = interactions, interactions_epoch = interactions_epoch))
 }
 
 
 proximity_threshold <- 0.000000001
-interactions_random <-updateVoteProbability_random(geo_nc_2755_test, proxmat1, alpha, beta, total_attributes, epochs = 200, proximity_threshold)
+interactions_random <-updateVoteProbability_3(geo_nc_2755_test, proxmat1, alpha, beta, total_attributes, epochs = 300, proximity_threshold)
+
+interactions_random1 <- interactions_random[[2]]
+interactions_random2 <- interactions_random[[1]]
 
 
-ggplot(interactions_random, aes(x = epoch, y = vote_prob, color = agent, group = agent)) +
+
+interactions_random2_agent1 <- interactions_random2 %>% filter(agent == 1)
+interactions_random1_agent1 <- interactions_random1 %>% filter(agent == 1)
+
+
+
+
+
+
+
+
+
+
+
+###################################################################
+## Visualizing the interactions ##
+###################################################################
+
+
+
+ggplot(interactions_random1, aes(x = epoch, y = vote_prob, color = agent, group = agent)) +
   geom_line(alpha = 0.5) +
   labs(title = "Change in Voting Probabilities over Epochs",
        x = "Epoch",
        y = "Voting Probability") +
   facet_wrap(~party)+
+  ylim(0.60,0.70)+
   theme_minimal()
+
+
+
+ggplot(interactions_random1_agent1, aes(x = epoch, y = vote_prob, color = party, group = party)) +
+  geom_line(alpha = 0.5) +
+  labs(title = "Change in Voting Probabilities over Epochs",
+       x = "Epoch",
+       y = "Voting Probability") +
+  theme_minimal()
+
+library(av)
+library(gganimate)
+
+# Animated plot of voting probabilities over epochs
+anim <- ggplot(interactions_random1, aes(x = epoch, y = vote_prob, color = party)) +
+  geom_line(aes(group = agent), alpha = 0.3) +
+  facet_wrap(~ party, scales = "free_y") +
+  labs(title = "Voting Probabilities Over Time",
+       x = "Epoch",
+       y = "Voting Probability") +
+  theme_minimal() +
+  transition_reveal(epoch)
+
+animate(anim, nframes = 200, fps = 10)
+
+
+
+
+
+# Extract coordinates and create layout matrix
+coords <- as.matrix(geo_nc_2755_test[, c("longitude", "latitude")])
+
+
+library(igraph)
+
+# Create an interaction network
+edges <- interactions_random2 %>%
+  select(agent, alter, epoch) %>%
+  filter(epoch == max(epoch)) %>%
+  distinct()
+
+
+g <- graph_from_data_frame(edges, directed = TRUE)
+V(g)$party <- interactions_max_party$party
+
+V(g)$party <- as.factor(V(g)$party)
+V(g)$party_num  <- as.numeric(V(g)$party)
+
+# Plot the network
+plot(g, vertex.label = NA, vertex.size = 3, vertex.color = V(g)$party, 
+     edge.arrow.size = 0.2,
+     edge.width = 0.2,
+     edge.curved = TRUE,
+     layout = coords,
+     main = "Interaction Network of Agents")+
+  legend("topright", 
+         legend = c("DEM" ,"NLB", "REP", "UNA"), 
+         pch = 19, 
+         col = categorical_pal(4)
+  )
+
+library(ggnetwork)
+library(ggplot2)
+library(dplyr)
+
+# Prepare the network plot using ggplot2 and ggnetwork
+network_plot <- ggplot(ggnetwork(g, layout = coords), aes(x = x, y = y, xend = xend, yend = yend)) +
+  geom_edges(color = "grey", linewidth = .5) +
+  geom_nodes(aes(color = factor(party)), size = 3) +
+  scale_color_manual(values = c("blue", "black", "red", "green")) +
+  theme_void() +
+  theme(legend.position = "right")
+
+######################################--------------------------------------
+
+
+
+
+#### TEST TEST TEST ##########
+
+
+
+
+
+
+
 
 
 
@@ -970,6 +1143,47 @@ ggplot(interactions_random, aes(x = epoch, y = vote_prob, color = agent, group =
 
 
 ########################################-----------------------------------
+
+
+
+### lets see who switched:
+
+# probably get it to wide format
+
+interactions_random1_300 <- interactions_random1 %>% filter(epoch == 300)
+
+# Identify the party with the highest probability for each agent at epoch 100
+interactions_max_party <- interactions_random1_300 %>%
+  group_by(agent) %>%
+  filter(vote_prob == max(vote_prob, na.rm = TRUE)) %>%
+  #slice(1) %>%  # In case of ties, take the first one
+  ungroup()
+
+table(interactions_max_party$party)
+
+
+logit <- function(p) {
+  log(p / (1 - p))
+}
+
+
+logit(0.6730887)
+
+
+geo_nc_2755_test$party_new <- interactions_max_party$party
+
+
+geo_nc_2755_test <- geo_nc_2755_test %>% mutate(switch = case_when(party_cd == party_new ~ 0,
+                                                                           party_cd != party_new ~1))
+table(geo_nc_2755_test$switch)
+
+
+
+
+
+########################################-----------------------------------
+
+###### election data from 2016 for initial configuration of model when model is finished
 
 head(geo_nc_27555)
 str(ncvhis_Statewide$election_lbl)

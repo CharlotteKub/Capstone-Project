@@ -344,12 +344,15 @@ geo_nc_27555$latitude <- as.numeric(geo_nc_27555$latitude)
 ## coordinates() is a function from the sp package in R, which is used to specify which columns of a dataframe 
 ## should be used as the spatial coordinates. It then transforms the df into a spatial object
 
-
+geo_nc_27555 <- geo_nc_2755_test
 coordinates(geo_nc_27555) = c("longitude","latitude")
 
-
+library(sp)
 
 ########## creating distance and proximity matrices ##########
+
+
+
 
 ncells <- length(geo_nc_27555)
 distmat <- matrix(NA, nrow=ncells, ncol=ncells)
@@ -365,8 +368,6 @@ for (i in 1:ncells) {
   distmat[i,] <- distVincentyEllipsoid(coordinates(geo_nc_27555)[i,], coordinates(geo_nc_27555)) 
 }
 
-
-
 # Inside the loop, the function distVincentyEllipsoid() is used to calculate the distance between the coordinates 
 # of the current cell (coordinates(dat)[i,]) and the coordinates of all other cells in the city (coordinates(dat)).
 
@@ -374,13 +375,14 @@ for (i in 1:ncells) {
 #printMat(proxmat)
 
 
-# We apply the distance decay function, so that the matrix expresses
-# proximity instead of distance.
+# We apply the distance decay function, so that the matrix expresses proximity instead of distance.
 # NOTE: For agents who live in the same cell, we want to avoid to assume their
-# distance is 0, because their proximity would be maximal. Instead, we
-# assume that their proximity is the average distance between all points
-# in a square sized 100*100 meters. That would be about 52.14m. Therefore,
-# we assume that the distance between a cell and itself is about 52.14m.
+# distance is 0, because their proximity would be maximal. Instead, we assume that their proximity is the average distance between all points
+# in a square sized 100*100 meters. That would be about 52.14m. Therefore, we assume that the distance between a cell and itself is about 52.14m.
+
+# By applying the exponential function to the negative distances (scaled by a factor of 10), 
+# it converts distances into proximity values.
+
 proxmat1 <- exp(-distmat/10) 
 proxmat2 <- exp(-distmat/100)
 proxmat3 <- exp(-distmat/1000)
@@ -491,7 +493,7 @@ proxmat2 <<- proxmat2
 proxmat3 <<- proxmat3
 
 
-###############################################
+###############################################o
 
 ### calculating exposure for different partisanships 
 
@@ -667,6 +669,12 @@ geo_nc_27555$grid_cell_id <- overlay$ID
 head(geo_nc_27555)
 
 
+
+
+
+
+
+
 ############################################------------------------------------------------
 # not needed anymore 
 
@@ -738,6 +746,15 @@ plot(grid100m)
 ###########################################------------------------------------------------------
 
 
+
+
+
+
+
+
+
+
+
 ######### Dissimilarity Index Calculation ########
 
 # Define the dissimilarity index function
@@ -767,6 +784,15 @@ dissimilarityIndex <- function(grid, inputWorld) {
   # And finally we have all the ingredients to calculate the index:
   return (sum(diss) * 0.5)
 }
+
+
+
+
+
+
+
+#############################################--------------------------------------------
+
 
 
 
@@ -826,6 +852,9 @@ plot(raster_blau_stack)
 
 
 #################################################----------------------------------
+
+
+
 
 sigmoid <- function(x) {
   return(1 / (1 + exp(-x)))
