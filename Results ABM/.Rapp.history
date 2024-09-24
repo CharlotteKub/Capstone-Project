@@ -1,0 +1,2 @@
+load("/Users/charlottekuberka/Desktop/LSE Term 2/Capstone-Project/ABM/Results ABM/interaction_urban_0.005.RData")
+load("/Users/charlottekuberka/Desktop/LSE Term 2/Capstone-Project/ABM/Results ABM/interaction_urban_0.01.RData")
