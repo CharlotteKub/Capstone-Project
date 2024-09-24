@@ -1,0 +1,812 @@
+---
+title: "Building A Model"
+author: "Charlotte Kuberka"
+date: "2024-05-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### Opinion formation models
+
+
+#### 1 ####
+
+
+```{r}
+updateVoteProbability <- function(agents, ego, alter, alpha, total_attributes) {
+  # Calculate Kronecker delta for party difference
+  party_diff <- ifelse(agents$party[ego] == agents$party[alter], 0, 1)
+  
+  # Calculate the number of shared sociodemographic attributes
+  
+shared_attributes <- sum(
+    agents$age_binned[ego] == agents$age_binned[alter], 
+    agents$race_code[ego] == agents$race_code[alter], 
+    agents$gender_code[ego] == agents$gender_code[alter]
+  )
+ 
+  # Calculate the change in probability
+  delta_P <- alpha * party_diff * (shared_attributes / total_attributes)
+  
+  # Update the voting probability
+  agents$vote_prob[ego] <- agents$vote_prob[ego] - delta_P
+  
+  return(agents$vote_prob[ego])
+}
+
+
+
+
+```
+
+__Attention:__ 
+
+For age create a categorical variable with age groups to have more overlaps.
+
+
+
+
+#### computeWeight Function
+
+
+This calculates the interaction weight (or 'similarity') between two interacting agents. "agents" refers to the dataframe containing the simulation agentset; "ego" and "alter" are two row indices that identify the pair of agents of which we wish to know the similarity (i,j); "H" is the model Homophily parameter:
+
+__Function Name:__ computeWeight
+
+__Parameters:__
+
+- agents: The dataframe containing the simulation agent set.
+- ego: The index of the first agent in the pair.
+- alter: The index of the second agent in the pair.
+- H: A model parameter controlling the influence of group affiliation on the interaction weight.
+
+The function computes the interaction weight between $i$ and $j$
+$weight=1−\frac{∣opinion(ego)−opinion(alter)∣×H+∣group(ego)−group(alter)∣×(1−H)}{1}$
+
+- $∣opinion(ego)−opinion(alter)∣$ = calculates differences in opinion
+- $∣group(ego)−group(alter)∣$ = calculates differences in group membership
+- The result is subtracted from 1 and divided by 1 to ensure that the interaction weight falls within the range [0, 1].
+- Return Value: The computed interaction weight between the ego and alter agents.
+
+```{r}
+computeWeight <- function(agents, ego, alter, H){
+  return(
+    1 - (abs(agents$opinion[ego] - agents$opinion[alter]) * H +
+           abs(agents$group[ego] - agents$group[alter]) * (1 - H)) / 1
+  )
+}
+
+```
+
+Function that returns the new opinion of the interacting agent(s), resulting from the interaction between ego and alter.
+
+
+`hasConverged` = The function checks if the interaction weight (w) is not zero, and if the opinion difference (opinionDiff) is not zero or two. If all conditions are met, hasConverged is set to FALSE, indicating that convergence has not been reached.
+
+`oEgo` =  The function computes the new opinion of the ego agent (`oEgo`) based on the interaction with the alter agent.
+The change in opinion is determined by the rate of opinion change (`rateOpinionChange`) and the interaction weight (w).
+The new opinion is constrained to the range [-1, 1].
+
+--> e.g. `rateOpinionChange` could be defined by ego characteristics (e.g. gender, age) + `interaction weight` could be defined by similarity in attributes (and opinion) between ego and alter
+
+
+```{r}
+
+
+NIcomputeOpinion <- function(
+  agents,                  
+  ego,
+  alter,
+  H,
+  typeInteraction = "two-way", # Type of interaction: "two-way" or "one-way"
+  rateOpinionChange = 1        # Rate at which opinions change, Default is 1 
+) {
+  
+  # We store the interaction weight and the opinion difference
+  w <- computeWeight(agents, ego, alter, H)
+  opinionDiff <- abs (agents$opinion[alter] - agents$opinion[ego])
+  
+  # We run a convergence test
+  hasConverged <- TRUE
+  if (w != 0 & opinionDiff != 0 & opinionDiff != 2 ) hasConverged <- FALSE
+  
+  # We update the opinion of ego
+  oEgo <- agents$opinion[ego] +
+    rateOpinionChange * (agents$opinion[alter] - agents$opinion[ego]) * w / 2
+  if (oEgo < -1) oEgo <- -1
+  else if (oEgo > 1) oEgo <- 1
+  
+  # If interactions are two-way (i.e. if alter influences ego and at the same
+  # time ego influences alter), then we also determine the new opinion of alter.
+  if (typeInteraction == "two-way"){
+    
+    oAlter <- agents$opinion[alter] +
+      rateOpinionChange * (agents$opinion[ego] - agents$opinion[alter]) * w / 2
+    if (oAlter < -1) {oAlter <- -1}
+    else if (oAlter > 1) {oAlter <- 1}
+    return(list(value = c(oEgo, oAlter), hasConverged = hasConverged))
+  } else {
+    return(list(value = oEgo, hasConverged = hasConverged))
+  }
+}
+
+```
+
+
+Functions that run the persuasive argument (PA) model:
+
+`opinion` = The argument function is called with the opinions of the ego and alter agents as arguments. It computes the persuasive argument presented by alter to ego. It is added to the opinion of ego. This represents how ego updates their opinion based on the persuasive argument presented by alter.
+
+```{r}
+
+PAcomputeOpinion <- function(ego, alter){
+  opinion <- ego$opinion + argument(ego$opinion, alter$opinion)
+  if (opinion < -1) opinion <- -1
+  else if (opinion > 1) opinion <- 1
+  return(opinion)
+}
+```
+
+
+For the PA model, this function returns the effect of a "pseudo-argument": that is, the amount of influence on the opinion of ego that an interaction with alter would have produced, if alter had communicated an argument to ego.
+
+```{r}
+
+argument <-function(opinion, j_opinion){
+  # Pro or Con Argument Selection
+  # A random binomial variable with probability parameter (j_opinion + 1) / 2 is generated. This represents the probability of agent j selecting a pro argument. If the result is 1, agent j picks a pro argument.
+  if (rbinom(1, 1, (j_opinion + 1) / 2) == 1) {  
+    # If j picks a pro argument...
+    if (rbinom(1, 1, (opinion + 1) / 2) == 1) { 
+      # ...and agent i drops a pro argument, then a=0 (ineffective argument exchange)
+      return(0)
+    } else {                                                
+      # ...and i drops a con argument, then i's opinion gets a positive push --> As a result of agent j presenting a pro        argument and agent i not countering it with a con argument, agent i's opinion receives a positive push.
+      return(2 / S) # S = scaling factor 
+    }
+  } else {                                                     
+    # If j picks a con argument
+    if (rbinom(1, 1, (opinion + 1) / 2) == 1){
+      # ...and i drops a pro argument, then i's opinion gets a negative push
+      return(-2 / S)
+    } else {                                                   
+      # ...and i drops a con argument, then a=0 (ineffective argument exchange)
+      return(0)
+    }
+  }
+}
+
+```
+
+Moran's I_____________________________________________________________________
+
+`x`: A numeric vector of values representing the attribute of interest (e.g., opinions) for each spatial unit.
+
+`y`: An optional numeric vector representing another attribute of interest. If not provided, it defaults to x.
+
+`proxmat`: A proximity matrix representing spatial relationships between units.
+
+`dens`: An optional numeric vector representing the proportion of individuals in each spatial unit over the total population. If not provided, it defaults to a vector of equal proportions.
+
+`N`: Total number of spatial units. Defaults to the length of x.
+
+```{r}
+moranI <- function(x, y = NULL, proxmat, dens = NULL, N = length(x)) {
+  # Adapted from Anselin (1995, eq. 7, 10, 11)
+  # https://onlinelibrary.wiley.com/doi/epdf/10.1111/j.1538-4632.1995.tb00338.x
+  
+
+  if(is.null(y)){y <- x}
+  if(is.null(dens)){dens <- rep(1/N, times = N)}
+  
+  # if y is not provided it defaults to x
+  # dens: if dens is not provided, it defaults to a vector of equal proportions based on the total number of      spatial units. if individual level data dens is.null and N is simply length of input
+  
+  #correct scaling of opinions for densities - it adjusts the opinions of spatial units to account for variations in         population densities across those units 
+  
+  v1dens_ind <- rep(x, times = (dens * N)) # For each spatial unit, the individual-level opinion (x) is replicated based on the proportion of individuals in that unit relative to the total population (dens * N). This replication ensures that units with more individuals have a proportionally greater influence on the overall opinion.
+  
+  v1dens <- (x - mean(v1dens_ind))/sd(v1dens_ind) # adjusted opinions are standardized to have a mean of 0 and a standard deviation of 1.
+  
+  v2dens_ind <- rep(y, times = (dens * N))
+  v2dens <- (y - mean(v2dens_ind)) / sd(v2dens_ind)
+  
+  # (density) weighted proximity matrix
+  w <- proxmat
+  wdens <- t(dens * t(w)) # Each element of the proximity matrix is multiplied element-wise by the corresponding density                              value from the dens vector. This operation effectively scales each row of the proximity matrix                             by the density of the corresponding spatial unit. The result is transposed with t()
+
+  wdens <- wdens / rowSums(wdens) # normalization by the sum of weights within each row
+  
+  # density and proximity weighted locals
+  localI <- (v1dens * wdens %*% v2dens) #formula 7 from Anselin (1995)
+  
+  # correct the normalization constants
+  m2 <- sum(v1dens^2 * dens)      # normalization constant m2 is computed based on the squared adjusted opinions and                                          densities
+  S0 <- N # we know the weight matrix for the individual level should add up to N
+  ydens <- S0 * m2
+  globalI <- sum(localI * dens * N) / ydens # formula 10/11: The global Moran's I statistic is computed by summing the                                          local Moran's I values weighted by the densities and the total number of spatial                                          units, and then divided by the normalization constant ydens.
+
+  
+  return(list(
+    globalI = globalI,
+    localI = as.numeric(localI)
+  ))
+}
+```
+
+
+
+```{r}
+# Moran's I
+#
+# Calculated at the global or local level.
+
+# Preparation of a fake world dataframe to test the index on.
+if (FALSE){
+  cityData <- subset(cbs100_rot, cbs100_rot$WK_CODE == districtsList[1])
+  cityData <- cityData[cityData$nauto2014!=0 & cityData$nnwal2014!=0,]
+  agents <- worldList[[1]]
+  G1 <<- which(agents$group == 1, arr.ind = TRUE)
+  G2 <<- which(agents$group != 1, arr.ind = TRUE)
+  #world$opinion <<- rbeta(populationSize, 3, 3, ncp = 0)
+  o1 <- rbeta(length(G1), 3, 3.5, ncp = 0)
+  o2 <- rbeta(length(G2), 3.5, 3, ncp = 0)
+  for (i in 1:nrow(world)){
+    if (agents$group[i] == 1) {
+      agents$opinion[i] <- o1[1]
+      o1 <- o1[-1]
+    } else {
+      agents$opinion[i] <- o2[1]
+      o2 <- o2[-1]
+    }
+  }
+  agents$opinion <- agents$opinion * 2 - 1
+  world <- agents
+  proxmat <- proximityList[[1]]
+  ops <- c(NA, length = length(cityData))
+  for (i in 1:length(cityData)){
+    cell <- subset(world, world$index == i)
+    ops[i] <- mean(cell$opinion)
+  }
+  cityData$opinion <- ops
+}
+
+
+
+
+MoranI <- function(x, y=NULL, proxmat, type="global") {
+  x <- scale(x)
+  N <- nrow(proxmat)
+  xm <- mean(x)
+  if(is.null(y)){
+    diag(proxmat) <- 0
+    proxmat <- proxmat / rowSums(proxmat)
+    y <- x
+    ym <- xm
+  } else {
+    y <- scale(y)
+    ym <- mean(y)
+  }
+  if (N != length(x) | length(x)!=length(y)) {
+    stop("Data and/or proximity matrix have different lengths.")
+  }
+  
+  if (type == "global"){
+    
+    # Global Moran's I
+    W <- sum(proxmat)
+    denom <- sum((x - xm) ^ 2)
+    nom <- 0
+    for (i in 1:N) {
+      for (j in 1:N) {nom <- nom + proxmat[i,j]*(x[i] - xm)*(y[j] - ym)}
+    }
+    return((N*nom)/(W*denom))
+  } else {
+    
+    # Local Moran's I - see https://onlinelibrary.wiley.com/doi/epdf/10.1111/j.1538-4632.1995.tb00338.x
+    m2 <- sum((x - xm)^2) / N
+    I <- c(NA, length = N)
+    for (i in 1:N) {
+      Zi <- x[i] - xm
+      nom <- 0
+      for (j in 1:N) {nom <- nom + (proxmat[i,j]*(y[j] - ym))}
+      I[i] <- (Zi / m2) * nom
+    }
+    return(I)
+  }
+}
+
+```
+
+
+
+
+
+-------------------
+
+### Main Simulation Run:
+
+#### Data:
+
+- `citySummary`= summary statistics for all 12 districts in Rotterdam
+- `worldList`= nested data frame with each district presented as a list, nrow = number of agents in district
+- `proximityList1` = three nested proximity lists for each of the 12 districts for the different distance functions (e.g. IDW)
+
+```{r}
+# This is the ABM: executing the function run() produces a simulation run,
+# and returns a list containing the resulting agentset and global variables.
+# The parameterization of "run" matters a great deal for the computing time:
+# simulations run faster with fewer simulated time steps (i.e. lower timeMax);
+# smaller districts (e.g. wijk=9); and lower size for the sample of agents on
+# which we calculate the polarization index (i.e. lower polSampleSize).
+#
+
+
+
+# Initialization:
+
+# The function begins by setting up the simulation environment, including setting the maximum simulation time (timeMax), initializing random number generator seed (seed), selecting the district (wijk), specifying initial opinion distribution (initialOpinionDistribution), and other simulation parameters.
+
+
+run <- function (
+  timeMax = 0,
+  seed  =  NULL,
+  wijk = 9, # District index from: citySummary$district
+  initialOpinionDistribution = "groupBias", # "uniform", "beta" or "groupBias"
+  H = 0.6,
+  rateOpinionChange = 1,
+  typeInteraction = "two-way",
+  distanceDecay = 2, # 1 means "s=10"; 2 "s=100"; 3 "s=1000"
+  polSampleSize = 50, # How many agents is the polarization index calculated on.
+  exportTimeSeries = FALSE,
+  spreadAgentsinCell = TRUE,
+  printStatusMessages = TRUE, 
+  printOpinionHistogram = TRUE
+) {
+  
+  
+  # Initialization of Agents ______________________________________________________________
+  
+  # Agents are represented as a data frame, with each row representing an agent. They are assigned to specific cells          within the district, and their opinions are initialized based on the specified distribution.
+
+  if (printStatusMessages) print("Generating world dataframe.")
+  #RNGversion("3.5") # For backward compatib. this can set an older RNG version
+  if (is.null(seed)) seed <- sample.int(999999999, size = 1) # if seed is not user generated, a random seed is generated                                                                 using the sample.int function
+  set.seed(seed)            # set the randomly generated seed for reproducibility 
+  
+  # We initialize a time variable.
+  steps <- 0
+  
+  # And we import from the calibration data file the appropriate district and agent information.
+  agents <- as.data.frame(worldList[[wijk]])    # using wordlist to get data for a specific district 
+  populationSize <- nrow(agents)                # population size = numbers of agents 
+  
+  # We also import the interaction network (aka the proximity matrix between square areas in the district). Because we      have three distance decay functions (1 is "s=10"; 2 is "s=100"; 3 is "s=1000"), we have three matrices  to choose from.
+  
+  if (distanceDecay == 1) proxmat <- proximityList1[[wijk]]
+  if (distanceDecay == 2) proxmat <- proximityList2[[wijk]]
+  if (distanceDecay == 3) proxmat <- proximityList3[[wijk]]
+  
+  
+  # If necessary, here we adjust agents' coordinates to be randomly spread in
+  # their cell. This is done for aesthetic purposes (e.g. for plotting the
+  # agents on a district map) - it does not affect the ABM functioning:
+  # the ABM always assumes that agents are located at the centroid of their 
+  # square area.
+  if (spreadAgentsinCell == TRUE) {
+    for (i in 1:populationSize){
+      agents$east[i] <- agents$east[i] + runif(n = 1, min = -50, max = 50)
+      agents$north[i] <- agents$north[i] + runif(n = 1, min = -50, max = 50)
+    }
+    agents <- cbind(agents, rd2wgs84(agents$east, agents$north))
+  }
+  #agents <- subset(agents, select = -c(east, north))
+  #agents <- subset(agents, select = -c(x_coor, y_coor))
+  
+  
+  # Here we calculate the probability of interaction of agents in a given cell
+  # with agents from other cells. This proability depends on the proximity
+  # between the two cells (given by proxmat), times the number of residents in
+  # the target cell.
+  nCells <- length(table(agents$index))
+  popDensity <- c()
+  probmat <- matrix(NA, nrow = nCells, ncol = nCells)
+  
+  for (i in 1:nCells) {
+    popDensity[i] <- nrow(subset(agents, agents$index == i))
+    probmat[,i] <- proxmat[,i] * popDensity[i]
+  }
+
+  
+  # Agents are divided into two groups:
+  #   - non-western (g = 1, or G1 for short);
+  #   - natives and western (g = -1, or G2 for short).
+  # We save the indices of which agents belong to which group. G1 and G2 will
+  # be useful later, when we'll need to select all agents from one group or the
+  # other.
+  G1 <- which(agents$group == 1, arr.ind = TRUE) # Non-western
+  G2 <- which(agents$group != 1, arr.ind = TRUE) # Natives and western
+  
+  
+  # Next, we give agents an opinion.
+  # For this, we have three presents: 
+  #   - uniform distibution (implemented as a beta distr. with alpha=beta=1)
+  #   - bell-shaped distribution (beta distribution with alpha=beta=3)
+  #   - bell-shaped distribution with different means for the two groups
+  #   (beta distribution: alpha=3 and beta=3.5 for one group, 3.5 and 3 for the
+  #    other group)
+  if (initialOpinionDistribution == "beta"){
+    agents$opinion <- rbeta(populationSize, 3, 3) * 2 - 1
+  } else if (initialOpinionDistribution == "uniform") {
+    agents$opinion <- rbeta(populationSize, 1, 1) * 2 - 1 # same as "runif()"
+  } else if (initialOpinionDistribution == "groupBias") {
+    o1 <- rbeta(length(G1), 3, 3.5) * 2 - 1
+    o2 <- rbeta(length(G2), 3.5, 3) * 2 - 1
+    agents$opinion[G1] <- o1
+    agents$opinion[G2] <- o2
+  }
+  
+  
+  # And we define a function to plot the distribution of opinions across the
+  # two groups. By updating this plot as the simulation progresses we can get a
+  # sense of what is happening.
+  histOpinion <- function(){
+    ggplot(data = agents, aes(x = opinion)) +
+      geom_histogram(binwidth = 0.05) +
+      facet_grid(
+        ~factor(as.character(group),
+                levels = c("-1", "1"),
+                labels = c("native and western", "non-western"))
+      ) +
+      scale_x_continuous(limits = c(-1.05,1.05)) +
+      ggtitle(paste0(
+        "District: ", citySummary$district[wijk],
+        ". Time index: ", steps, " of ", timeMax))
+  }
+  
+  
+  # And we print the plot:
+  if (printOpinionHistogram == TRUE) suppressWarnings(print(histOpinion()))
+  
+  
+  # We also define a function that creates and populates the data structure
+  # that we'll use to export the initialization parameters and some global
+  # simulation statistics. Parameters and outcome stats will be saved in a 
+  # vector (here implemented as a one-row data.frame).
+  createoutput <- function (...){
+    out <- data.frame(
+      seed = seed,
+      wijk = wijk,
+      initialOpinionDistribution = initialOpinionDistribution,
+      H = H,
+      rateOpinionChange = rateOpinionChange,
+      typeInteraction = typeInteraction,
+      distanceDecay = distanceDecay,
+      timeMax = timeMax,
+      polSampleSize = polSampleSize,
+      steps = steps,
+      polarizationIndex = polarizationIndex,
+      meanOpinionGlobal = meanOpinionGlobal,
+      absOpGlobal = absOpGlobal,
+      varOpinionGlobal = varOpinionGlobal,
+      meanOpinionG1 = meanOpinionG1,
+      absOpG1 = absOpG1,
+      varOpinionG1 = varOpinionG1,
+      meanOpinionG2 = meanOpinionG2,
+      absOpG2 = absOpG2,
+      varOpinionG2 = varOpinionG2,
+      opAlignment1 = opAlignment1,
+      opAlignment2 = opAlignment2,
+      opAlignment3 = opAlignment3
+    )
+    return(out)
+  }
+  
+  
+  # We also define a function to calculate the spatial measures, i.e. agent- and
+  # district-level alignment.
+  computeSpatialMeasures <- function() {
+    
+    # Taking the district composition at the cell-level (aka "square unit").
+    dat <- subset(cbs100_rot, cbs100_rot$WK_CODE == districtsList[wijk])
+    dat <- dat[dat$nauto2014 != 0 & dat$nnwal2014 != 0,] 
+    dat$dens <- dat$inw2014 / citySummary$n_pop[wijk]
+    
+    # For each cell, we take the average opinion of its residents:
+    ops <- rep(NA, times = nrow(dat))
+    for (cell in 1:length(dat)) {
+      ops[cell] <- mean(agents[agents$location == dat$OBJECTID[cell],"opinion"])
+    }
+    dat$opinion <- ops
+    
+    # No we have all we need to calculate Moran's I:
+    opAlignment1 <- moranI( # opinion-group alignment
+      x = dat$pnwal2014,
+      y = dat$opinion,
+      proxmat = proximityList1[[wijk]],
+      dens = dat$dens,
+      N = citySummary$n_pop[wijk]
+    )
+    opAlignment2 <- moranI(
+      x = dat$pnwal2014,
+      y = dat$opinion,
+      proxmat = proximityList2[[wijk]],
+      dens = dat$dens,
+      N = citySummary$n_pop[wijk]
+    )
+    opAlignment3 <- moranI(
+      x = dat$pnwal2014,
+      y = dat$opinion,
+      proxmat = proximityList3[[wijk]],
+      dens = dat$dens,
+      N = citySummary$n_pop[wijk]
+    )
+    
+    # We add the local I estimates to each agent, based on the cell in which
+    # they reside.
+    agents <- base::merge(
+      x = agents,
+      y = as.data.frame(cbind(
+        dat$OBJECTID,
+        opAlignment1 = opAlignment1$localI,
+        opAlignment2 = opAlignment2$localI,
+        opAlignment3 = opAlignment3$localI
+      )),
+      by.x="location",
+      by.y = "V1"
+    )
+    opAlignment1 <- opAlignment1$globalI
+    opAlignment2 <- opAlignment2$globalI
+    opAlignment3 <- opAlignment3$globalI
+    
+    return(list(
+      agents = agents,
+      opAlignment1 = opAlignment1,
+      opAlignment2 = opAlignment2,
+      opAlignment3 = opAlignment3
+    ))
+  }
+  
+  
+  # The initialization ends by declaring some variables: these are agent-level
+  # attributes that we will update during the simulation.
+  agents$timeFirstExtr <- agents$nIntFirstExtr <- NA
+  agents$nInteractions <- agents$durationPol <- 0
+  if (printStatusMessages) print(paste("Initialization completed:", Sys.time()))
+  #if (printVideoFrames == TRUE){downloadBaseMap(zoom=16)}
+  
+  
+  # We also prepare a data structure that allows us to export the time series:
+  # a snapshot of the agentset and global statistics for each step of the
+  # simulation.
+  if (exportTimeSeries == TRUE){
+    timeS <- list()
+    timeS[[1]] <- list()
+    timeS[[2]] <- list()
+  }
+  
+  
+  
+  # Simulation__________________________________________________________________
+  #
+  # This is the main loop of the simulation. Each cycle "t" is a time step.
+  for (t in 1:timeMax){
+    
+    # Setting the timeMax to zero means that the model simply initializes the
+    # district, but the actual simulation of the interactions between agents do
+    # not need to start. Thus:
+    if (timeMax == 0) break()
+    
+    # At every time point, we ask all agents, taken one at a time and in
+    # random order, to do the following.
+    shuffledAgents <- sample(1:nrow(agents)) # shuffling the agentset.
+    for (ego in shuffledAgents) {
+      
+      
+      # For every agent "ego", we first select an interaction partner, "alter",
+      # with a relative probability given by the probability matrix "probmat".
+      # The first step to finding Alter is to choose Alter's cell, here called
+      # "targetCell".
+      egoCell <- agents$index[ego]
+      targetCell <- sample(c(1:nCells), 1, prob = probmat[egoCell,])
+      
+      
+      # Then, we find Alter as an agent from the target cell, chosen with
+      # uniform probability. We also ensure that our Ego does not interact with
+      # itself.
+      repeat{ 
+        alter <- sample(c(1:popDensity[targetCell]), 1)
+        alter <- as.numeric(
+          rownames(agents[which(agents$index == targetCell),][alter,])
+        )
+        if (ego != alter) break 
+      }
+      
+      
+      # Then, we simulate the interaction between Ego and Alter. At the end of
+      # the interaction, Ego (and, if the interaction is two-way, also Alter)
+      # will have updated their opinion.
+      # The function NIcomputeOpinion() tells us what their opinion will be.
+      newOp <- NIcomputeOpinion(
+        agents, ego, alter, H, typeInteraction, rateOpinionChange
+      )
+      
+      # Updating Ego's opinion accordingly:
+      agents$opinion[ego] <- newOp$value[1]
+      
+      
+      # We also keep track of how many interactions Ego has had throughout the
+      # simulation. If Ego's new opinion is extreme (i.e. +1 or -1), then we
+      # Write down the simulation time step in which Ego has become extremist,
+      # and also how many interactions Ego has had at that point.
+      agents$nInteractions[ego] <- agents$nInteractions[ego] + 1
+      
+      if (is.na(agents$timeFirstExtr[ego]) &
+          # Notice how we test for equality using all.equal(): this is meant
+          # to mitigate floating-point errors:
+          isTRUE(all.equal(abs(newOp$value[1]), 1))) {
+        agents$timeFirstExtr[ego] <- steps + 1
+        agents$nIntFirstExtr[ego] <- agents$nInteractions[ego]
+      }
+      
+      
+      # If the interaction is two-way (the default), it means that both Ego and
+      # Alter update their opinion at the end of their interaction. So, we
+      # update Alter in the same way we did for Ego:
+      if (typeInteraction == "two-way"){
+        agents$opinion[alter] <- newOp$value[2]
+        agents$nInteractions[alter] <- agents$nInteractions[alter] + 1
+        if (is.na(agents$timeFirstExtr[alter]) &
+            isTRUE(all.equal(abs(newOp$value[2]), 1))) {
+          agents$timeFirstExtr[alter] <- steps + 1
+          agents$nIntFirstExtr[alter] <- agents$nInteractions[alter]
+        }
+      }
+    }
+    
+    
+    # Now all agents have interacted as Ego once. We can measure some agent- and
+    # district-level statistics.
+    # Starting with the agent-level, we update a simple outcome variable: 
+    # the amount of time each agent has held an extreme opinion.
+    for(i in 1:nrow(agents)){
+      if (isTRUE(all.equal(abs(agents$opinion[i]), 1))) {
+        agents$durationPol[i] <- agents$durationPol[i] + 1
+      }
+    }
+    
+    
+    # Next we move to the district-level outcome measures.
+    # We first calculate the polarization index on a sample of agents.
+    # Here we create the sample for the polarization index. Note that we
+    # identify the sample agents at the start of the simulation, and we'll then
+    # keep track of the agents in the sample throughout the simulation.
+    if (steps == 0) {
+      ifelse(
+        populationSize > polSampleSize,
+        polSampleIndices <- sample(c(1:populationSize), size = polSampleSize),
+        polSampleIndices <- c(1:populationSize)
+      )
+    }
+    polSample <- agents[polSampleIndices,]
+    
+    
+    # The polarization index is the variance of opinion differences among the
+    # (sample) agents. To calculate it, we start by calculating the opinion
+    # difference between each pair of agents (in the sample).
+    opinionDifferences <- c()
+    for (i in 1:nrow(polSample)){
+      for (j in 1:nrow(polSample)) {
+        if(i != j) {
+          oD <- abs(polSample$opinion[i] - polSample$opinion[j])
+          opinionDifferences <- append (opinionDifferences, oD)
+        }
+      }
+    }
+    
+    # And then take the variance:
+    polarizationIndex <- var(opinionDifferences)
+    
+    
+    # Here we measure some other outcome variables: some on the whole
+    # population, and some on the two groups separately (G1 and G2).
+    meanOpinionGlobal <- mean (agents$opinion)
+    varOpinionGlobal <- var (agents$opinion)
+    absOpGlobal <- mean(abs(agents$opinion))
+    opinionG1 <- agents$opinion[G1] # G1 is non-western residents, or "g = 1"
+    opinionG2 <- agents$opinion[G2] # G2 is natives and western, or "g = -1"
+    meanOpinionG1 <- mean(opinionG1)
+    meanOpinionG2 <- mean(opinionG2)
+    absOpG1 <- mean(abs(opinionG1))
+    absOpG2 <- mean(abs(opinionG2))
+    varOpinionG1 <- var(opinionG1)
+    varOpinionG2 <- var(opinionG2)
+    
+    
+    # Updating the simulation time index:
+    steps <- steps + 1
+    
+    
+    # We run a naïve convergence test to get an idea of whether the simulation
+    # has reached (or has nearly reached) an equilibrium. In equilibrium, no 
+    # interactions can lead agents to change their opinion. We search for two 
+    # equilibria: perfect consensus and perfect between-group polarization
+    # (aka global alignment).
+    if(
+      # if consensus is reached...
+      (isTRUE(all.equal(meanOpinionGlobal, meanOpinionG1)) &
+       isTRUE(all.equal(meanOpinionGlobal, meanOpinionG2)) &
+       isTRUE(all.equal(varOpinionGlobal, 0))) |
+      
+      # or if bipolarization is reached...
+      (isTRUE(all.equal(varOpinionG1, 0)) &
+       isTRUE(all.equal(varOpinionG2, 0)) &
+       (isTRUE(all.equal(abs(meanOpinionG1), 1))) &
+       (isTRUE(all.equal(abs(meanOpinionG2), 1)))
+      )
+    )
+    
+    # ... then the system has converged.
+    {hasConverged <- TRUE} else {hasConverged <- FALSE}
+    
+    
+    # We are concluding a simulation time step. Depending on the circumstances,
+    # e.g. if we are saving all information for every time step
+    # (exportTimeSeries == TRUE), or if the system has converged and thus this
+    # is the last time step, we might have to calculate some more outcome 
+    # variables and return/save them.
+    if (exportTimeSeries == TRUE){
+      spatialMeasures <- computeSpatialMeasures() # measuring alignment
+      agents <- spatialMeasures$agents
+      opAlignment1 <- spatialMeasures$opAlignment1
+      opAlignment2 <- spatialMeasures$opAlignment2
+      opAlignment3 <- spatialMeasures$opAlignment3
+      
+      timeS[[1]][[steps]] <- createoutput()
+      timeS[[2]][[steps]] <- agents
+      agents$opAlignment1 <- agents$opAlignment2 <- agents$opAlignment3 <- NULL
+    }
+    
+    if (printStatusMessages) print(paste("Time:", steps, "of", timeMax))
+    if (printOpinionHistogram == TRUE) {
+      dev.off()
+      suppressWarnings(print(histOpinion()))
+    }
+    
+    
+    # This is where we export/return the simulation results at the end of the
+    # simulation run.
+    if (hasConverged | steps == timeMax) {
+      if (hasConverged & printStatusMessages){
+        print (paste(
+          "System converged to equilibrium. Polarization index:",
+          polarizationIndex
+        ))
+      } else { # Instead, if steps == timeMax,
+        if (printStatusMessages) {
+          print(paste("System not converged within the simulated time.",
+                      "Simulation terminated."))
+        }
+      }
+      spatialMeasures <- computeSpatialMeasures()
+      agents <- spatialMeasures$agents
+      opAlignment1 <- spatialMeasures$opAlignment1
+      opAlignment2 <- spatialMeasures$opAlignment2
+      opAlignment3 <- spatialMeasures$opAlignment3
+      break
+    }
+  }
+  
+  results <- list(
+    districtStats = createoutput(),
+    agents = agents
+  )
+  if (exportTimeSeries) results$timeSeries <- timeS
+  return(results)
+}
+```
+
+

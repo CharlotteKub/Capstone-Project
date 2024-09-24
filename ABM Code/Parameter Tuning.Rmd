@@ -1,0 +1,1392 @@
+---
+title: "Parameter Tuning"
+output: html_document
+date: "2024-08-02"
+---
+
+### **Baseline Model:**
+
+-   mu = 0.005
+
+-   proximity threshold = 0.05
+
+-   kNN = 50 (rural), 200 (urban)
+
+-   Interaction Range = $\lambda$ = 1.3 (rural), $\lambda$ = 1.7
+
+-   Stubbornness S = exp(-S)
+
+```{r}
+# load data and packages
+
+load("~/Desktop/LSE/LSE Courses/LSE Msc ASDS/LSE Term 2/Capstone-Project/DATA ABM R/coords_adress_28203_2016.RData")
+load("~/Desktop/LSE/LSE Courses/LSE Msc ASDS/LSE Term 2/Capstone-Project/DATA ABM R/distmat_28203_2016.RData")
+load("~/Desktop/LSE/LSE Courses/LSE Msc ASDS/LSE Term 2/Capstone-Project/DATA ABM R/geo_nc_28203_abm_small.RData")
+load("~/Desktop/LSE/LSE Courses/LSE Msc ASDS/LSE Term 2/Capstone-Project/DATA ABM R/geo_nc_28203.RData")
+load("~/Desktop/LSE/LSE Courses/LSE Msc ASDS/LSE Term 2/Capstone-Project/DATA ABM R/coords_adress_27915_2016.RData")
+load("~/Desktop/LSE/LSE Courses/LSE Msc ASDS/LSE Term 2/Capstone-Project/DATA ABM R/distmat_27915_2016.RData")
+
+
+library(dplyr)
+library(FNN)  # For finding nearest neighbors
+k <- 200  # Number of nearest neighbors
+coords_28203 <- coords_adress_28203 %>% dplyr::select(lon, lat)
+# Find nearest neighbors
+knn_28203 <- get.knn(coords_28203, k)
+
+k <- 50  # Number of nearest neighbors
+coords_27915 <- coords_adress_27915 %>% dplyr::select(lon, lat)
+# Find nearest neighbors
+knn_27915 <- get.knn(coords_27915, k)
+
+
+proxmat2_28203 <- exp(-distmat_28203/100)
+proxmat2_27915 <- exp(-distmat_27915/100)
+
+
+#save(proxmat2_27915, file="proxmat2_27915.RData")
+
+```
+
+
+#### Update Function Rural Area
+
+--> delta_P_una <- mu * sim_ij /2
+
+```{r}
+updateVoteProbability_15 <- function(agents, proximity_matrix, mu, total_attributes, epochs, proximity_threshold, p, C, knn_matrix, lambda) {
+  num_agents <- nrow(agents)
+  
+  # Convert to data.table for efficiency
+  setDT(agents)
+  interactions <- data.table(epoch = integer(), ncid= integer(), agent = integer(), alter = integer(), party = character(), vote_prob = numeric(), delta_P = numeric())
+  interactions_epoch <- data.table(epoch = integer(), ncid= integer(), agent = integer(), party = character(), vote_prob = numeric(), voted_party_cd = character())
+  blau_indices <- data.table(epoch = integer(), blau_index = numeric())
+  
+  # Precompute potential alters for each agent
+  potential_alters_list <- lapply(1:num_agents, function(ego) {
+    which(proximity_matrix[ego, ] > proximity_threshold & proximity_matrix[ego, ] < 1)
+  })
+  
+  for (epoch in 1:epochs) {
+    cat("Epoch:", epoch, "\n")
+    
+    # Update exposure values at the start of each epoch
+    exposure_values <- calcExposurePartisanship(agents, proximity_matrix, proximity_threshold)
+    agents[, `:=`(
+      exposureIngroup = exposure_values$exposureIngroup,
+      exposureOutgroup = exposure_values$exposureOutgroup,
+      party_majority = exposure_values$party_majority
+    )]
+    
+    # Calculate Blau Index for each agent using k-NN
+    party <- agents$voted_party_cd
+    agents[, Blau_party := {
+      neighbors_indices <- knn_matrix$nn.index[.I, ]
+      neighbors_parties <- party[neighbors_indices]
+      party_proportions <- table(neighbors_parties) / length(neighbors_indices)
+      party_proportions <- as.numeric(party_proportions)
+      1 - sum(party_proportions^2)
+    }, by = 1:num_agents]
+    
+     agents[, `:=`(age_binned_factor = as.factor(age_binned),
+                   race_code_factor = as.factor(race_code),
+                   gender_code_factor = as.factor(gender_code))]
+
+    for (ego in 1:num_agents) {
+      # Randomly assign the number of interactions for this agent for this day using a Poisson distribution
+      num_interactions <- rpois(1, lambda = lambda)
+      num_interactions <- min(num_interactions, 7)  # Ensure the value does not exceed 7
+      
+      # If no interactions, skip to the next agent
+      if (num_interactions == 0) next
+      
+      potential_alters <- potential_alters_list[[ego]]
+      
+      if (length(potential_alters) > 0) {
+        for (interaction in 1:num_interactions) {
+          alter <- sample(potential_alters, 1)
+          
+          if (ego != alter) {
+            interaction_prob <- proximity_matrix[ego, alter]
+            party_diff <- ifelse(agents$voted_party_cd[ego] == agents$voted_party_cd[alter], 0, 1)
+            
+            dem_sim <- sum(
+              agents$age_binned_factor[ego] == agents$age_binned_factor[alter], 
+              agents$race_code_factor[ego] == agents$race_code_factor[alter], 
+              agents$gender_code_factor[ego] == agents$gender_code_factor[alter]
+            ) / total_attributes
+            
+            opin_attrs <- c("DEM_prob", "UNA_prob", "LIB_prob", "GRE_prob", "REP_prob")
+            opin_diffs <- abs(agents[ego, opin_attrs, with = FALSE] - agents[alter, opin_attrs, with = FALSE])
+            opin_sim <- sum(1 - opin_diffs) / length(opin_attrs)
+            
+            sim_ij <- (dem_sim + opin_sim) / 2
+            
+            if (agents$Blau_party[ego] <= 0.3) {
+              sim_ij <- sim_ij * C
+            }
+            
+            delta_P <- if (sim_ij < 0.6) {
+              0
+            } else {
+              if (agents$voted_party_cd[alter] == "UNA" |agents$voted_party_cd[ego] == "UNA") {
+                0
+              } else {
+                if (party_diff == 1) {
+                  if (agents$voted_party_cd[alter] == agents$party_majority[ego] & agents$exposureOutgroup[ego] > 0.5) {
+                    -mu * sim_ij * p
+                  } else {
+                    -mu * sim_ij
+                  }
+                } else {
+                  mu * sim_ij
+                }
+              }
+            }
+            
+            # Calculate adjusted delta_P considering the stubbornness of ego and alter
+            delta_P_ego <- delta_P *  exp(-agents$st_stubbornness[ego])
+            delta_P_alter <- delta_P * exp(-agents$st_stubbornness[alter])
+
+             #delta_P_ego <- delta_P
+             #delta_P_alter <- delta_P 
+             delta_P_una <- mu * sim_ij /2
+             
+            ego_party_col <- paste0(agents$voted_party_cd[ego], "_prob")
+            alter_party_col <- paste0(agents$voted_party_cd[alter], "_prob")
+            
+            agents[[ego_party_col]][ego] <- agents[[ego_party_col]][ego] + delta_P_ego
+            agents[[alter_party_col]][ego] <- agents[[alter_party_col]][ego] - delta_P_ego
+            
+            agents[[ego_party_col]][alter] <- agents[[ego_party_col]][alter] - delta_P_alter
+            agents[[alter_party_col]][alter] <- agents[[alter_party_col]][alter] + delta_P_alter
+            
+            # Increase UNA probability if party_diff == 1 and the other agent's party is REP
+            if (party_diff == 1) {
+              if (agents$voted_party_cd[ego] == "DEM" && agents$voted_party_cd[alter] == "REP") {
+              agents[["UNA_prob"]][ego] <- agents[["UNA_prob"]][ego] + delta_P_una
+              
+              } else if (agents$voted_party_cd[ego] == "REP" && agents$voted_party_cd[alter] == "DEM"){
+              agents[["UNA_prob"]][alter] <- agents[["UNA_prob"]][alter] + delta_P_una
+
+              }
+            }
+            
+            interactions <- rbind(interactions, data.table(
+              epoch = epoch,
+              ncid = agents$ncid[ego],
+              agent = ego,
+              alter = alter,
+              party = agents$voted_party_cd[ego],
+              vote_prob = agents[[paste0(agents$voted_party_cd[ego], "_prob")]][ego],
+              delta_P = delta_P_ego
+            ))
+            
+            # Determine the party with the highest probability for both ego and alter
+            ego_party_probs <- unlist(agents[ego, .(DEM_prob, UNA_prob, REP_prob)])
+            ego_party_index <- which.max(ego_party_probs)
+            ego_party <- c("DEM", "UNA", "REP")[ego_party_index]
+            
+            alter_party_probs <- unlist(agents[alter, .(DEM_prob, UNA_prob, REP_prob)])
+            alter_party_index <- which.max(alter_party_probs)
+            alter_party <- c("DEM", "UNA", "REP")[alter_party_index]
+            
+            agents$voted_party_cd[ego] <- ego_party
+            agents$voted_party_cd[alter] <- alter_party
+          }
+        }
+      }
+    }
+    
+    # Log voting probabilities and party preferences after each epoch
+    for (agent in 1:num_agents) {
+      party_prob_cols <- grep("_prob$", colnames(agents), value = TRUE)
+      for (party_col in party_prob_cols) {
+        alter_party_cd <- NA  # Initialize with NA if no interaction
+        # Get the alter's party if any interactions happened
+        if (agent %in% interactions$agent) {
+          alter_party_cd <- interactions$party[interactions$agent == agent & interactions$epoch == epoch]
+        }
+        interactions_epoch <- rbind(interactions_epoch, data.table(
+          epoch = epoch,
+          ncid = agents$ncid[ego],
+          agent = agent,
+          party = gsub("_prob", "", party_col),
+          vote_prob = agents[[party_col]][agent],
+          voted_party_cd = agents$voted_party_cd[agent]
+        ), fill = TRUE)
+      }
+    }
+
+    # Calculate and store Blau Index for the entire neighborhood after each epoch
+    blau_index_epoch <- agents[, mean(Blau_party, na.rm = TRUE)]
+    blau_indices <- rbind(blau_indices, data.table(epoch = epoch, blau_index = blau_index_epoch))
+    
+    # Plot after every 10 epochs
+    if (epoch %% 10 == 0) {
+      plot_current <- interactions_epoch[epoch == epoch] %>%
+        ggplot(aes(x = vote_prob, fill = party)) +
+        geom_histogram(position = 'stack', alpha = 0.6, bins = 30) +
+        labs(title = paste('Vote Probability Distribution at Epoch', epoch), x = 'Vote Probability', y = 'Count', fill = 'Party') +
+        theme_minimal()
+      print(plot_current)
+    }
+  }
+  
+  return(list(interactions = interactions, interactions_epoch = interactions_epoch, blau_indices = blau_indices))
+}
+
+```
+
+
+
+#### 2nd Attempt with different weights for UNA voters:
+
+--> delta_P_una <- mu * sim_ij /3
+
+```{r}
+updateVoteProbability_15_una_3 <-function(agents, proximity_matrix, mu, total_attributes, epochs, proximity_threshold, p, C, knn_matrix, lambda) {
+  num_agents <- nrow(agents)
+  
+  # Convert to data.table for efficiency
+  setDT(agents)
+  interactions <- data.table(epoch = integer(), agent = integer(), alter = integer(), party = character(), vote_prob = numeric(), delta_P = numeric())
+  interactions_epoch <- data.table(epoch = integer(), agent = integer(), party = character(), vote_prob = numeric(), voted_party_cd = character())
+  blau_indices <- data.table(epoch = integer(), blau_index = numeric())
+  
+  # Precompute potential alters for each agent
+  potential_alters_list <- lapply(1:num_agents, function(ego) {
+    which(proximity_matrix[ego, ] > proximity_threshold & proximity_matrix[ego, ] < 1)
+  })
+  
+  for (epoch in 1:epochs) {
+    cat("Epoch:", epoch, "\n")
+    
+    # Update exposure values at the start of each epoch
+    exposure_values <- calcExposurePartisanship(agents, proximity_matrix, proximity_threshold)
+    agents[, `:=`(
+      exposureIngroup = exposure_values$exposureIngroup,
+      exposureOutgroup = exposure_values$exposureOutgroup,
+      party_majority = exposure_values$party_majority
+    )]
+    
+    # Calculate Blau Index for each agent using k-NN
+    party <- agents$voted_party_cd
+    agents[, Blau_party := {
+      neighbors_indices <- knn_matrix$nn.index[.I, ]
+      neighbors_parties <- party[neighbors_indices]
+      party_proportions <- table(neighbors_parties) / length(neighbors_indices)
+      party_proportions <- as.numeric(party_proportions)
+      1 - sum(party_proportions^2)
+    }, by = 1:num_agents]
+    
+     agents[, `:=`(age_binned_factor = as.factor(age_binned),
+                   race_code_factor = as.factor(race_code),
+                   gender_code_factor = as.factor(gender_code))]
+
+    for (ego in 1:num_agents) {
+      # Randomly assign the number of interactions for this agent for this day using a Poisson distribution
+      num_interactions <- rpois(1, lambda = lambda)
+      num_interactions <- min(num_interactions, 7)  # Ensure the value does not exceed 7
+      
+      # If no interactions, skip to the next agent
+      if (num_interactions == 0) next
+      
+      potential_alters <- potential_alters_list[[ego]]
+      
+      if (length(potential_alters) > 0) {
+        for (interaction in 1:num_interactions) {
+          alter <- sample(potential_alters, 1)
+          
+          if (ego != alter) {
+            interaction_prob <- proximity_matrix[ego, alter]
+            party_diff <- ifelse(agents$voted_party_cd[ego] == agents$voted_party_cd[alter], 0, 1)
+            
+            dem_sim <- sum(
+              agents$age_binned_factor[ego] == agents$age_binned_factor[alter], 
+              agents$race_code_factor[ego] == agents$race_code_factor[alter], 
+              agents$gender_code_factor[ego] == agents$gender_code_factor[alter]
+            ) / total_attributes
+            
+            opin_attrs <- c("DEM_prob", "UNA_prob", "LIB_prob", "GRE_prob", "REP_prob")
+            opin_diffs <- abs(agents[ego, opin_attrs, with = FALSE] - agents[alter, opin_attrs, with = FALSE])
+            opin_sim <- sum(1 - opin_diffs) / length(opin_attrs)
+            
+            sim_ij <- (dem_sim + opin_sim) / 2
+            
+            if (agents$Blau_party[ego] <= 0.3) {
+              sim_ij <- sim_ij * C
+            }
+            
+            delta_P <- if (sim_ij < 0.6) {
+              0
+            } else {
+              if (agents$voted_party_cd[alter] == "UNA" |agents$voted_party_cd[ego] == "UNA") {
+                0
+              } else {
+                if (party_diff == 1) {
+                  if (agents$voted_party_cd[alter] == agents$party_majority[ego] & agents$exposureOutgroup[ego] > 0.5) {
+                    -mu * sim_ij * p
+                  } else {
+                    -mu * sim_ij
+                  }
+                } else {
+                  mu * sim_ij
+                }
+              }
+            }
+            
+            # Calculate adjusted delta_P considering the stubbornness of ego and alter
+            delta_P_ego <- delta_P *  exp(-agents$st_stubbornness[ego])
+            delta_P_alter <- delta_P * exp(-agents$st_stubbornness[alter])
+
+             #delta_P_ego <- delta_P
+             #delta_P_alter <- delta_P 
+             delta_P_una <- mu * sim_ij /3
+             
+            ego_party_col <- paste0(agents$voted_party_cd[ego], "_prob")
+            alter_party_col <- paste0(agents$voted_party_cd[alter], "_prob")
+            
+            agents[[ego_party_col]][ego] <- agents[[ego_party_col]][ego] + delta_P_ego
+            agents[[alter_party_col]][ego] <- agents[[alter_party_col]][ego] - delta_P_ego
+            
+            agents[[ego_party_col]][alter] <- agents[[ego_party_col]][alter] - delta_P_alter
+            agents[[alter_party_col]][alter] <- agents[[alter_party_col]][alter] + delta_P_alter
+            
+            # Increase UNA probability if party_diff == 1 and the other agent's party is REP
+            if (party_diff == 1) {
+              if (agents$voted_party_cd[ego] == "DEM" && agents$voted_party_cd[alter] == "REP") {
+                agents[["UNA_prob"]][ego] <- agents[["UNA_prob"]][ego] + delta_P_una
+              } else if (agents$voted_party_cd[ego] == "REP" && agents$voted_party_cd[alter] == "DEM") {
+                agents[["UNA_prob"]][alter] <- agents[["UNA_prob"]][alter] + delta_P_una
+              }
+            }
+            
+            interactions <- rbind(interactions, data.table(
+              epoch = epoch,
+              agent = ego,
+              alter = alter,
+              party = agents$voted_party_cd[ego],
+              vote_prob = agents[[paste0(agents$voted_party_cd[ego], "_prob")]][ego],
+              delta_P = delta_P_ego
+            ))
+            
+            # Determine the party with the highest probability for both ego and alter
+            ego_party_probs <- unlist(agents[ego, .(DEM_prob, UNA_prob, REP_prob)])
+            ego_party_index <- which.max(ego_party_probs)
+            ego_party <- c("DEM", "UNA", "REP")[ego_party_index]
+            
+            alter_party_probs <- unlist(agents[alter, .(DEM_prob, UNA_prob, REP_prob)])
+            alter_party_index <- which.max(alter_party_probs)
+            alter_party <- c("DEM", "UNA", "REP")[alter_party_index]
+            
+            agents$voted_party_cd[ego] <- ego_party
+            agents$voted_party_cd[alter] <- alter_party
+          }
+        }
+      }
+    }
+    
+    # Log voting probabilities and party preferences after each epoch
+    for (agent in 1:num_agents) {
+      party_prob_cols <- grep("_prob$", colnames(agents), value = TRUE)
+      for (party_col in party_prob_cols) {
+        alter_party_cd <- NA  # Initialize with NA if no interaction
+        # Get the alter's party if any interactions happened
+        if (agent %in% interactions$agent) {
+          alter_party_cd <- interactions$party[interactions$agent == agent & interactions$epoch == epoch]
+        }
+        interactions_epoch <- rbind(interactions_epoch, data.table(
+          epoch = epoch,
+          agent = agent,
+          party = gsub("_prob", "", party_col),
+          vote_prob = agents[[party_col]][agent],
+          voted_party_cd = agents$voted_party_cd[agent]
+        ), fill = TRUE)
+      }
+    }
+
+    # Calculate and store Blau Index for the entire neighborhood after each epoch
+    blau_index_epoch <- agents[, mean(Blau_party, na.rm = TRUE)]
+    blau_indices <- rbind(blau_indices, data.table(epoch = epoch, blau_index = blau_index_epoch))
+    
+    # Plot after every 10 epochs
+    if (epoch %% 10 == 0) {
+      plot_current <- interactions_epoch[epoch == epoch] %>%
+        ggplot(aes(x = vote_prob, fill = party)) +
+        geom_histogram(position = 'stack', alpha = 0.6, bins = 30) +
+        labs(title = paste('Vote Probability Distribution at Epoch', epoch), x = 'Vote Probability', y = 'Count', fill = 'Party') +
+        theme_minimal()
+      print(plot_current)
+    }
+  }
+  
+  return(list(interactions = interactions, interactions_epoch = interactions_epoch, blau_indices = blau_indices))
+}
+```
+
+
+
+#### Update Function Urban Area:
+
+--> delta_P_una <- mu * sim_ij /4
+
+```{r}
+library(data.table)
+library(ggplot2)
+library(parallel)
+
+
+
+updateVoteProbability_15_urban <- function(agents, proximity_matrix, mu, total_attributes, epochs, proximity_threshold, p, C, knn_matrix, lambda) {
+  
+  num_agents <- nrow(agents)
+  
+  # Convert to data.table for efficiency
+  setDT(agents)
+  interactions <- data.table(epoch = integer(), agent = integer(), alter = integer(), party = character(), vote_prob = numeric(), delta_P = numeric())
+  interactions_epoch <- data.table(epoch = integer(), agent = integer(), party = character(), vote_prob = numeric(), voted_party_cd = character())
+  blau_indices <- data.table(epoch = integer(), blau_index = numeric())
+  
+  # Precompute potential alters for each agent
+  potential_alters_list <- lapply(1:num_agents, function(ego) {
+    which(proximity_matrix[ego, ] > proximity_threshold & proximity_matrix[ego, ] < 1)
+  })
+  
+    for (epoch in 1:epochs) {
+    # Print statement for monitoring epochs
+    cat("Epoch:", epoch, "\n")
+    
+    # Update exposure values at the start of each epoch
+    exposure_values <- calcExposurePartisanship(agents, proximity_matrix, proximity_threshold)
+    agents[, `:=`(
+      exposureIngroup = exposure_values$exposureIngroup,
+      exposureOutgroup = exposure_values$exposureOutgroup,
+      party_majority = exposure_values$party_majority
+    )]
+    
+    # Calculate Blau Index for each agent using k-NN
+    party <- agents$voted_party_cd
+    agents[, Blau_party := {
+      neighbors_indices <- knn_matrix$nn.index[.I, ]
+      neighbors_parties <- party[neighbors_indices]
+      party_proportions <- table(neighbors_parties) / length(neighbors_indices)
+      party_proportions <- as.numeric(party_proportions)
+      1 - sum(party_proportions^2)
+    }, by = 1:num_agents]
+    
+     agents[, `:=`(age_binned_factor = as.factor(age_binned),
+                   race_code_factor = as.factor(race_code),
+                   gender_code_factor = as.factor(gender_code))]
+
+    for (ego in 1:num_agents) {
+      # Randomly assign the number of interactions for this agent for this day using a Poisson distribution
+      num_interactions <- rpois(1, lambda = lambda)
+      num_interactions <- min(num_interactions, 7)  # Ensure the value does not exceed 7
+      
+      # If no interactions, skip to the next agent
+      if (num_interactions == 0) next
+      
+      potential_alters <- potential_alters_list[[ego]]
+      
+      if (length(potential_alters) > 0) {
+        for (interaction in 1:num_interactions) {
+          alter <- sample(potential_alters, 1)
+          
+          if (ego != alter) {
+            interaction_prob <- proximity_matrix[ego, alter]
+            party_diff <- ifelse(agents$voted_party_cd[ego] == agents$voted_party_cd[alter], 0, 1)
+            
+            dem_sim <- sum(
+              agents$age_binned_factor[ego] == agents$age_binned_factor[alter], 
+              agents$race_code_factor[ego] == agents$race_code_factor[alter], 
+              agents$gender_code_factor[ego] == agents$gender_code_factor[alter]
+            ) / total_attributes
+            
+            opin_attrs <- c("DEM_prob", "UNA_prob", "LIB_prob", "GRE_prob", "REP_prob")
+            opin_diffs <- abs(agents[ego, opin_attrs, with = FALSE] - agents[alter, opin_attrs, with = FALSE])
+            opin_sim <- sum(1 - opin_diffs) / length(opin_attrs)
+            
+            sim_ij <- (dem_sim + opin_sim) / 2
+            
+            if (agents$Blau_party[ego] <= 0.3) {
+              sim_ij <- sim_ij * C
+            }
+            
+            delta_P <- if (sim_ij < 0.6) {
+              0
+            } else {
+              if (agents$voted_party_cd[alter] == "UNA" |agents$voted_party_cd[ego] == "UNA") {
+                0
+              } else {
+                if (party_diff == 1) {
+                  if (agents$voted_party_cd[alter] == agents$party_majority[ego] & agents$exposureOutgroup[ego] > 0.5) {
+                    -mu * sim_ij * p
+                  } else {
+                    -mu * sim_ij
+                  }
+                } else {
+                  mu * sim_ij
+                }
+              }
+            }
+            
+            # Calculate adjusted delta_P considering the stubbornness of ego and alter
+            delta_P_ego <- delta_P *  exp(-agents$st_stubbornness[ego])
+            delta_P_alter <- delta_P * exp(-agents$st_stubbornness[alter])
+
+             #delta_P_ego <- delta_P
+             #delta_P_alter <- delta_P 
+             delta_P_una <- mu * sim_ij /4
+             
+            ego_party_col <- paste0(agents$voted_party_cd[ego], "_prob")
+            alter_party_col <- paste0(agents$voted_party_cd[alter], "_prob")
+            
+            agents[[ego_party_col]][ego] <- agents[[ego_party_col]][ego] + delta_P_ego
+            agents[[alter_party_col]][ego] <- agents[[alter_party_col]][ego] - delta_P_ego
+            
+            agents[[ego_party_col]][alter] <- agents[[ego_party_col]][alter] - delta_P_alter
+            agents[[alter_party_col]][alter] <- agents[[alter_party_col]][alter] + delta_P_alter
+            
+            # Increase UNA probability if party_diff == 1 and the other agent's party is REP
+            if (party_diff == 1) {
+              if (agents$voted_party_cd[ego] == "DEM" && agents$voted_party_cd[alter] == "REP") {
+              agents[["UNA_prob"]][ego] <- agents[["UNA_prob"]][ego] + delta_P_una
+              agents[["UNA_prob"]][alter] <- agents[["UNA_prob"]][alter] + delta_P_una
+
+              } else if (agents$voted_party_cd[ego] == "REP" && agents$voted_party_cd[alter] == "DEM") {
+              agents[["UNA_prob"]][alter] <- agents[["UNA_prob"]][alter] + delta_P_una
+              agents[["UNA_prob"]][ego] <- agents[["UNA_prob"]][ego] + delta_P_una
+
+              }
+            }
+            
+            interactions <- rbind(interactions, data.table(
+              epoch = epoch,
+              agent = ego,
+              alter = alter,
+              party = agents$voted_party_cd[ego],
+              vote_prob = agents[[paste0(agents$voted_party_cd[ego], "_prob")]][ego],
+              delta_P = delta_P_ego
+            ))
+            
+            # Determine the party with the highest probability for both ego and alter
+            ego_party_probs <- unlist(agents[ego, .(DEM_prob, UNA_prob, REP_prob)])
+            ego_party_index <- which.max(ego_party_probs)
+            ego_party <- c("DEM", "UNA", "REP")[ego_party_index]
+            
+            alter_party_probs <- unlist(agents[alter, .(DEM_prob, UNA_prob, REP_prob)])
+            alter_party_index <- which.max(alter_party_probs)
+            alter_party <- c("DEM", "UNA", "REP")[alter_party_index]
+            
+            agents$voted_party_cd[ego] <- ego_party
+            agents$voted_party_cd[alter] <- alter_party
+          }
+        }
+      }
+    }
+    
+    # Log voting probabilities and party preferences after each epoch
+    for (agent in 1:num_agents) {
+      party_prob_cols <- grep("_prob$", colnames(agents), value = TRUE)
+      for (party_col in party_prob_cols) {
+        alter_party_cd <- NA  # Initialize with NA if no interaction
+        # Get the alter's party if any interactions happened
+        if (agent %in% interactions$agent) {
+          alter_party_cd <- interactions$party[interactions$agent == agent & interactions$epoch == epoch]
+        }
+        interactions_epoch <- rbind(interactions_epoch, data.table(
+          epoch = epoch,
+          agent = agent,
+          party = gsub("_prob", "", party_col),
+          vote_prob = agents[[party_col]][agent],
+          voted_party_cd = agents$voted_party_cd[agent]
+        ), fill = TRUE)
+      }
+    }
+
+    # Calculate and store Blau Index for the entire neighborhood after each epoch
+    blau_index_epoch <- agents[, mean(Blau_party, na.rm = TRUE)]
+    blau_indices <- rbind(blau_indices, data.table(epoch = epoch, blau_index = blau_index_epoch))
+    
+    # Plot after every 10 epochs
+    if (epoch %% 10 == 0) {
+      plot_current <- interactions_epoch[epoch == epoch] %>%
+        ggplot(aes(x = vote_prob, fill = party)) +
+        geom_histogram(position = 'stack', alpha = 0.6, bins = 30) +
+        labs(title = paste('Vote Probability Distribution at Epoch', epoch), x = 'Vote Probability', y = 'Count', fill = 'Party') +
+        theme_minimal()
+      print(plot_current)
+    }
+  }
+  
+  return(list(interactions = interactions, interactions_epoch = interactions_epoch, blau_indices = blau_indices))
+}
+
+```
+
+### Rural Models:
+
+#### $\mu$ Social Influence Tuning:
+
+Range: {0.001, 0.005, 0.01, 0.05}
+
+```{r}
+
+mu_values <- c(0.001, 0.005, 0.01, 0.05, 0.1)
+interaction_mu <- list()
+
+# Loop through each mu value
+for (mu in mu_values) {
+  # Run the updateVoteProbability_15 function with the current mu
+  interaction <- updateVoteProbability_15(
+    geo_nc_27915_abm_small, 
+    proxmat2_27915, 
+    mu = mu, 
+    total_attributes = 3, 
+    epochs = 400, 
+    proximity_threshold = 0.05, 
+    p = 1.5, 
+    C = 1.1, 
+    knn_27915, 
+    lambda = 1.3
+  )
+  
+  # Store the result in the list, using mu as the name for clarity
+  interaction_mu[[paste0("mu_", mu)]] <- interaction
+}
+
+
+
+load("~/Desktop/LSE/LSE Courses/LSE Msc ASDS/LSE Term 2/Capstone-Project/ABM/Results ABM/Rural/interaction_mu.RData")
+
+interactions_mu_0.001 <- interaction_mu$mu_0.001
+interactions_mu_0.005 <- interaction_mu$mu_0.005
+interactions_mu_0.01 <- interaction_mu$mu_0.01
+interactions_mu_0.05 <- interaction_mu$mu_0.05
+interactions_mu_0.1 <- interaction_mu$mu_0.1
+
+```
+
+```{r}
+
+## Visualizing the different mu values and their effect to convergence
+
+blau_mu_0.001 <- interactions_mu_0.001$blau_indices
+blau_mu_0.001$mu <- 0.001
+blau_mu_0.005 <- interactions_mu_0.005$blau_indices
+blau_mu_0.005$mu <- 0.005
+blau_mu_0.01 <- interactions_mu_0.01$blau_indices
+blau_mu_0.01$mu <- 0.01
+blau_mu_0.05 <- interactions_mu_0.05$blau_indices
+blau_mu_0.05$mu <- 0.05
+blau_mu_0.1 <- interactions_mu_0.1$blau_indices
+blau_mu_0.1$mu <- 0.1
+
+
+
+blau_mu_merged <- rbind(blau_mu_0.001, blau_mu_0.005, blau_mu_0.01, blau_mu_0.05, blau_mu_0.1)
+
+
+blau_mu_merged$mu <- as.factor(blau_mu_merged$mu)
+str(blau_mu_merged$mu)
+
+
+ggplot(blau_mu_merged, aes(x=epoch, y = blau_index, color = mu, group = mu)) +
+  geom_line(linewidth = .8) +  scale_color_brewer(palette = "Paired") + theme_bw()+
+  labs(y= "Blau Index", x = "Epoch", color = "Mu Value", title = "Rural Area")+
+  ylim(0.25,0.7)
+
+
+ggsave("mu_tuning_rural.png", dpi = 95)
+
+```
+
+#### Spatial Proximity Tuning:
+
+```{r}
+proximity_values <- c(0.001, 0.05, 0.02, 0.01)
+
+
+interaction_proxmity <- list()
+
+# Loop through each mu value
+for (proximity in proximity_values) {
+  # Run the updateVoteProbability_15 function with the current mu
+  interaction <- updateVoteProbability_15(
+    geo_nc_27915_abm_small, 
+    proxmat2_27915, 
+    mu = 0.01, 
+    total_attributes = 3, 
+    epochs = 400, 
+    proximity_threshold = proximity, 
+    p = 1.5, 
+    C = 1.1, 
+    knn_27915, 
+    lambda = 1.3
+  )
+  
+  # Store the result in the list, using mu as the name for clarity
+  interaction_proxmity[[paste0("proximity_", proximity)]] <- interaction
+}
+
+# save(interaction_proxmity, file = "interaction_proxmity_rural.RData")
+
+interaction_proxmity_0.001 <- interaction_proxmity$proximity_0.001
+interaction_proxmity_0.05 <- interaction_proxmity$proximity_0.05
+interaction_proxmity_0.02 <- interaction_proxmity$proximity_0.02
+interaction_proxmity_0.01 <- interaction_proxmity$proximity_0.01
+
+
+```
+
+```{r}
+## Visualizing the different mu values and their effect to convergence
+
+blau_prox_0.001 <- interaction_proxmity_0.001$blau_indices
+blau_prox_0.001$prox <- 0.001
+blau_prox_0.05 <- interaction_proxmity_0.05$blau_indices
+blau_prox_0.05$prox <- 0.05
+blau_prox_0.02 <- interaction_proxmity_0.02$blau_indices
+blau_prox_0.02$prox <- 0.02
+blau_prox_0.01 <- interaction_proxmity_0.01$blau_indices
+blau_prox_0.01$prox <- 0.01
+
+
+blau_prox_merged <- rbind(blau_prox_0.001, blau_prox_0.05, blau_prox_0.02, blau_prox_0.01)
+
+
+blau_prox_merged$prox<- as.factor(blau_prox_merged$prox)
+str(blau_prox_merged$prox)
+
+ggplot(blau_prox_merged, aes(x=epoch, y = blau_index, color = prox, group = prox)) +
+  geom_line(linewidth = .8) +  scale_color_brewer(palette = "Paired") + theme_bw()+
+  labs(y= "Blau Index", x = "Epoch", color = "Proximity Value")
+
+# ggsave("prox_tuning_rural.png", dpi= 95)
+
+```
+
+
+
+#### Other Testing:
+
+Testing out $\mu$ = 0.0025
+
+```{r}
+
+  interaction_rural_0.005_test1 <- updateVoteProbability_15(
+    geo_nc_27915_abm_small, 
+    proxmat2_27915, 
+    mu = 0.005, 
+    total_attributes = 3, 
+    epochs = 400, 
+    proximity_threshold = 0.05, 
+    p = 1.5, 
+    C = 1.1, 
+    knn_27915, 
+    lambda = 1.3
+  )
+  
+  
+# save(interaction_rural_0.005_test1, file = "interaction_rural_0.005_test1.RData")
+  
+  
+  
+  
+interaction_rural_0.004_test1 <- updateVoteProbability_15(
+    geo_nc_27915_abm_small, 
+    proxmat2_27915, 
+    mu = 0.004, 
+    total_attributes = 3, 
+    epochs = 400, 
+    proximity_threshold = 0.05, 
+    p = 1.5, 
+    C = 1.1, 
+    knn_27915, 
+    lambda = 1.3
+  )
+  
+  
+  
+interaction_rural_0.004_test2 <- updateVoteProbability_15_una_3(
+    geo_nc_27915_abm_small, 
+    proxmat2_27915, 
+    mu = 0.004, 
+    total_attributes = 3, 
+    epochs = 400, 
+    proximity_threshold = 0.05, 
+    p = 1.5, 
+    C = 1.1, 
+    knn_27915, 
+    lambda = 1.3
+  )
+  
+  
+    
+    interaction_rural_0.005_test2 <- updateVoteProbability_15_una_3(
+    geo_nc_27915_abm_small, 
+    proxmat2_27915, 
+    mu = 0.005, 
+    total_attributes = 3, 
+    epochs = 400, 
+    proximity_threshold = 0.05, 
+    p = 1.5, 
+    C = 1.1, 
+    knn_27915, 
+    lambda = 1.3
+  )
+  
+    
+# save(interaction_rural_0.004_test1, file = "interaction_rural_0.004_test1.RData")
+  
+```
+
+
+
+
+### Urban Models:
+
+```{r}
+
+#### this model is the best !!
+# UNA = delta_P_una <- mu * sim_ij /4 for REP and DEM
+
+interaction_urban_0.005 <- updateVoteProbability_15_urban(geo_nc_28203_abm_small, proxmat2_28203, mu = 0.005, total_attributes = 3, epochs = 400, proximity_threshold = 0.05, p = 1, C = 1, knn_28203, lambda = 1.7)
+
+
+blau_index_urban_0.005 <- interaction_rural_0.005$blau_indices
+interaction_epoch_0.005 <- interaction_rural_0.005$interactions_epoch
+
+ggplot(blau_index_urban_0.005, aes(x=epoch,y= blau_index))+
+  geom_line() +theme_bw() +ylim(0.5,0.7) + labs(y="Blau Index", x = "Epoch")
+
+# ggsave("blau_index_urban_0.005.png", dpi = 95)
+
+voted_parties_15_urban_0.005 <- interaction_epoch_0.005 %>% group_by(epoch) %>%
+  count(voted_party_cd) %>% mutate(prop = n/sum(n))
+
+ggplot(voted_parties_15_urban_0.005, aes(x=epoch, y = prop, group = voted_party_cd, color = voted_party_cd))+  geom_line()  +theme_bw()  +   scale_color_manual(values = c("DEM" = "blue", "REP" = "red", "UNA" = "purple"))+
+  labs(title="Change in Partisan Affiliation: Urban Neighborhood", y = "Number", x = "Epoch", color = "Party Affiliation") + ylim(0,0.8)
+
+
+interaction_urban_0.005 <- interaction_rural_0.05
+
+# ggsave("voted_parties_urban_0.005.png", dpi = 95)
+
+
+#save(interaction_urban_0.005, file = "interaction_urban_0.005.RData")
+
+```
+
+```{r}
+
+mu_values1 <- c(0.001, 0.005, 0.01)
+mu_values2 <- c(0.05, 0.1)
+
+interaction_mu_urban <- list()
+
+# Loop through each mu value
+for (mu in mu_values1) {
+  # Run the updateVoteProbability_15 function with the current mu
+  interaction <- updateVoteProbability_15(
+    geo_nc_28203_abm_small, 
+    proxmat2_28203, 
+    mu = mu, 
+    total_attributes = 3, 
+    epochs = 400, 
+    proximity_threshold = 0.05, 
+    p = 1, 
+    C = 1, 
+    knn_28203, 
+    lambda = 1.7
+  )
+  
+  # Store the result in the list, using mu as the name for clarity
+  interaction_mu_urban[[paste0("mu_", mu)]] <- interaction
+}
+
+# save(interaction_mu_urban, file = "interaction_mu_urban.RData")
+
+
+```
+
+#### 
+
+```{r}
+
+
+load("~/Desktop/LSE/LSE Courses/LSE Msc ASDS/LSE Term 2/Capstone-Project/ABM/Results ABM/Urban/interaction_urban_0.005.RData")
+load("~/Desktop/LSE/LSE Courses/LSE Msc ASDS/LSE Term 2/Capstone-Project/ABM/Results ABM/Urban/interaction_urban_0.05.RData")
+load("~/Desktop/LSE/LSE Courses/LSE Msc ASDS/LSE Term 2/Capstone-Project/ABM/Results ABM/Urban/interaction_urban_0.01.RData")
+load("~/Desktop/LSE/LSE Courses/LSE Msc ASDS/LSE Term 2/Capstone-Project/ABM/Results ABM/Urban/interaction_urban_0.001.RData")
+
+
+
+## Visualizing the different mu values and their effect to convergence
+
+blau_mu_0.001_urban <- interaction_15urban_optimized_0.001$blau_indices
+blau_mu_0.001_urban$mu <- 0.001
+blau_mu_0.005_urban <- interaction_urban_0.005$blau_indices
+blau_mu_0.005_urban$mu <- 0.005
+blau_mu_0.01_urban <- interaction_urban_0.01$blau_indices
+blau_mu_0.01_urban$mu <- 0.01
+blau_mu_0.05_urban <- interaction_urban_0.05$blau_indices
+blau_mu_0.05_urban$mu <- 0.05
+
+
+
+
+blau_mu_merged_urban <- rbind(blau_mu_0.001_urban, blau_mu_0.005_urban, blau_mu_0.01_urban, blau_mu_0.05_urban)
+
+
+blau_mu_merged_urban$mu <- as.factor(blau_mu_merged_urban$mu)
+str(blau_mu_merged_urban$mu)
+
+
+ggplot(blau_mu_merged_urban, aes(x=epoch, y = blau_index, color = mu, group = mu)) +
+  geom_line(linewidth = .8) +  scale_color_brewer(palette = "Paired") + theme_bw()+
+  labs(y= "Blau Index", x = "Epoch", color = "Mu Value", title = "Urban Area")+
+    ylim(0.25,0.7)
+
+
+ggsave("mu_tuning_urban.png", dpi = 95)
+
+
+
+
+```
+
+
+
+### Similarity Bias vs Assimilation Model:
+
+```{r}
+
+updateVoteProbability_assimilation <- function(agents, proximity_matrix, mu, total_attributes, epochs, proximity_threshold, p, C, knn_matrix, lambda) {
+  num_agents <- nrow(agents)
+  
+  # Convert to data.table for efficiency
+  setDT(agents)
+  interactions <- data.table(epoch = integer(), agent = integer(), alter = integer(), party = character(), vote_prob = numeric(), delta_P = numeric())
+  interactions_epoch <- data.table(epoch = integer(), agent = integer(), party = character(), vote_prob = numeric(), voted_party_cd = character())
+  blau_indices <- data.table(epoch = integer(), blau_index = numeric())
+  
+  # Precompute potential alters for each agent
+  potential_alters_list <- lapply(1:num_agents, function(ego) {
+    which(proximity_matrix[ego, ] > proximity_threshold & proximity_matrix[ego, ] < 1)
+  })
+  
+  for (epoch in 1:epochs) {
+    cat("Epoch:", epoch, "\n")
+    
+    # Update exposure values at the start of each epoch
+    exposure_values <- calcExposurePartisanship(agents, proximity_matrix, proximity_threshold)
+    agents[, `:=`(
+      exposureIngroup = exposure_values$exposureIngroup,
+      exposureOutgroup = exposure_values$exposureOutgroup,
+      party_majority = exposure_values$party_majority
+    )]
+    
+    # Calculate Blau Index for each agent using k-NN
+    party <- agents$voted_party_cd
+    agents[, Blau_party := {
+      neighbors_indices <- knn_matrix$nn.index[.I, ]
+      neighbors_parties <- party[neighbors_indices]
+      party_proportions <- table(neighbors_parties) / length(neighbors_indices)
+      party_proportions <- as.numeric(party_proportions)
+      1 - sum(party_proportions^2)
+    }, by = 1:num_agents]
+    
+    # agents[, `:=`(age_binned_factor = as.factor(age_binned), 
+    #               race_code_factor = as.factor(race_code), 
+    #               gender_code_factor = as.factor(gender_code))]
+
+    for (ego in 1:num_agents) {
+      # Randomly assign the number of interactions for this agent for this day using a Poisson distribution
+      num_interactions <- rpois(1, lambda = lambda)
+      num_interactions <- min(num_interactions, 7)  # Ensure the value does not exceed 7
+      
+      # If no interactions, skip to the next agent
+      if (num_interactions == 0) next
+      
+      potential_alters <- potential_alters_list[[ego]]
+      
+      if (length(potential_alters) > 0) {
+        for (interaction in 1:num_interactions) {
+          alter <- sample(potential_alters, 1)
+          
+          if (ego != alter) {
+            interaction_prob <- proximity_matrix[ego, alter]
+            party_diff <- ifelse(agents$voted_party_cd[ego] == agents$voted_party_cd[alter], 0, 1)
+            
+            # dem_sim <- sum(
+            #   agents$age_binned_factor[ego] == agents$age_binned_factor[alter], 
+            #   agents$race_code_factor[ego] == agents$race_code_factor[alter], 
+            #   agents$gender_code_factor[ego] == agents$gender_code_factor[alter]
+            # ) / total_attributes
+            
+            # opin_attrs <- c("DEM_prob", "UNA_prob", "LIB_prob", "GRE_prob", "REP_prob")
+            # opin_diffs <- abs(agents[ego, opin_attrs, with = FALSE] - agents[alter, opin_attrs, with = FALSE])
+            # opin_sim <- sum(1 - opin_diffs) / length(opin_attrs)
+            # 
+            # sim_ij <- (dem_sim + opin_sim) / 2
+            # 
+            # if (agents$Blau_party[ego] <= 0.3) {
+            #   sim_ij <- sim_ij * C
+            # }
+            
+            # delta_P <- if (sim_ij < 0.6) {
+            #   0
+            # } else {
+      delta_P <- if (agents$voted_party_cd[alter] == "UNA" |agents$voted_party_cd[ego] == "UNA") {
+                0
+              } else {
+                if (party_diff == 1) {
+                  if (agents$voted_party_cd[alter] == agents$party_majority[ego] & agents$exposureOutgroup[ego] > 0.5) {
+                #    -mu * sim_ij * p
+                    -mu *p
+                  } else {
+                #    -mu * sim_ij
+                    -mu
+                  }
+                } else {
+              #    mu * sim_ij
+                  mu
+                }
+              }
+            # }
+            
+            # Calculate adjusted delta_P considering the stubbornness of ego and alter
+            delta_P_ego <- delta_P *  exp(-agents$st_stubbornness[ego])
+            delta_P_alter <- delta_P * exp(-agents$st_stubbornness[alter])
+
+             #delta_P_ego <- delta_P
+             #delta_P_alter <- delta_P 
+             #delta_P_una <- mu * sim_ij /2
+              delta_P_una <- mu/3
+             
+            ego_party_col <- paste0(agents$voted_party_cd[ego], "_prob")
+            alter_party_col <- paste0(agents$voted_party_cd[alter], "_prob")
+            
+            agents[[ego_party_col]][ego] <- agents[[ego_party_col]][ego] + delta_P_ego
+            agents[[alter_party_col]][ego] <- agents[[alter_party_col]][ego] - delta_P_ego
+            
+            agents[[ego_party_col]][alter] <- agents[[ego_party_col]][alter] - delta_P_alter
+            agents[[alter_party_col]][alter] <- agents[[alter_party_col]][alter] + delta_P_alter
+            
+            # Increase UNA probability if party_diff == 1 and the other agent's party is REP
+            if (party_diff == 1) {
+              if (agents$voted_party_cd[ego] == "DEM" && agents$voted_party_cd[alter] == "REP") {
+                agents[["UNA_prob"]][ego] <- agents[["UNA_prob"]][ego] + delta_P_una
+              } else if (agents$voted_party_cd[ego] == "REP" && agents$voted_party_cd[alter] == "DEM") {
+                agents[["UNA_prob"]][alter] <- agents[["UNA_prob"]][alter] + delta_P_una
+              }
+            }
+            
+            interactions <- rbind(interactions, data.table(
+              epoch = epoch,
+              agent = ego,
+              alter = alter,
+              party = agents$voted_party_cd[ego],
+              vote_prob = agents[[paste0(agents$voted_party_cd[ego], "_prob")]][ego],
+              delta_P = delta_P_ego
+            ))
+            
+            # Determine the party with the highest probability for both ego and alter
+            ego_party_probs <- unlist(agents[ego, .(DEM_prob, UNA_prob, REP_prob)])
+            ego_party_index <- which.max(ego_party_probs)
+            ego_party <- c("DEM", "UNA", "REP")[ego_party_index]
+            
+            alter_party_probs <- unlist(agents[alter, .(DEM_prob, UNA_prob, REP_prob)])
+            alter_party_index <- which.max(alter_party_probs)
+            alter_party <- c("DEM", "UNA", "REP")[alter_party_index]
+            
+            agents$voted_party_cd[ego] <- ego_party
+            agents$voted_party_cd[alter] <- alter_party
+          }
+        }
+      }
+    }
+    
+    # Log voting probabilities and party preferences after each epoch
+    for (agent in 1:num_agents) {
+      party_prob_cols <- grep("_prob$", colnames(agents), value = TRUE)
+      for (party_col in party_prob_cols) {
+        alter_party_cd <- NA  # Initialize with NA if no interaction
+        # Get the alter's party if any interactions happened
+        if (agent %in% interactions$agent) {
+          alter_party_cd <- interactions$party[interactions$agent == agent & interactions$epoch == epoch]
+        }
+        interactions_epoch <- rbind(interactions_epoch, data.table(
+          epoch = epoch,
+          agent = agent,
+          party = gsub("_prob", "", party_col),
+          vote_prob = agents[[party_col]][agent],
+          voted_party_cd = agents$voted_party_cd[agent]
+        ), fill = TRUE)
+      }
+    }
+
+    # Calculate and store Blau Index for the entire neighborhood after each epoch
+    blau_index_epoch <- agents[, mean(Blau_party, na.rm = TRUE)]
+    blau_indices <- rbind(blau_indices, data.table(epoch = epoch, blau_index = blau_index_epoch))
+    
+    # Plot after every 10 epochs
+    if (epoch %% 10 == 0) {
+      plot_current <- interactions_epoch[epoch == epoch] %>%
+        ggplot(aes(x = vote_prob, fill = party)) +
+        geom_histogram(position = 'stack', alpha = 0.6, bins = 30) +
+        labs(title = paste('Vote Probability Distribution at Epoch', epoch), x = 'Vote Probability', y = 'Count', fill = 'Party') +
+        theme_minimal()
+      print(plot_current)
+    }
+  }
+  
+  return(list(interactions = interactions, interactions_epoch = interactions_epoch, blau_indices = blau_indices))
+}
+```
+
+
+__Rural Models:__
+
+```{r}
+interaction_assimilation_rural_0.004 <- updateVoteProbability_assimilation(
+    geo_nc_27915_abm_small,
+    proxmat2_27915,
+    mu = 0.004,
+    total_attributes = 3,
+    epochs = 400,
+    proximity_threshold = 0.05,
+    p = 1.5,
+    C = 1.1,
+    knn_27915,
+    lambda = 1.3
+  )
+
+
+interaction_assimilation_0.005 <- updateVoteProbability_assimilation(
+    geo_nc_27915_abm_small,
+    proxmat2_27915,
+    mu = 0.005,
+    total_attributes = 3,
+    epochs = 400,
+    proximity_threshold = 0.05,
+    p = 1.5,
+    C = 1.1,
+    knn_27915,
+    lambda = 1.3
+  )
+
+
+
+save(interaction_assimilation_rural_0.004, file = "interaction_assimilation_rural_0.004.RData")
+
+save(interaction_assimilation_0.005, file = "interaction_assimilation_0.005_rural.RData")
+
+
+```
+
+
+#### Urban Assimilation Model:
+
+```{r}
+
+interaction_urban_assimilation <- updateVoteProbability_assimilation(geo_nc_28203_abm_small, proxmat2_28203, 
+                                                                     mu = 0.005, total_attributes = 3, epochs = 400, 
+                                                                     proximity_threshold = 0.05, p = 1, C = 1, knn_28203, 
+                                                                     lambda = 1.7)
+
+
+
+save(interaction_urban_assimilation, file = "interaction_urban_assimilation.RData")
+```
+
+
+
+
+```{r}
+load("~/Desktop/LSE/LSE Courses/LSE Msc ASDS/LSE Term 2/Capstone-Project/ABM/Results ABM/interaction_assimilation_rural.RData")
+
+
+interaction_assimilation_blau <- interaction_assimilation$blau_indices
+
+interaction_assimilation_epoch_rural <- interaction_assimilation$interactions_epoch
+
+
+ggplot(interaction_assimilation_blau, aes(x=epoch,y= blau_index))+
+  geom_line(linewidth = .7) + ylim(0.5,0.7) +theme_bw()
+
+
+voted_parties_rural_assimilation <- interaction_assimilation_epoch_rural %>% group_by(epoch) %>%
+  count(voted_party_cd) %>% mutate(prop = n/sum(n))
+
+
+blau_index_data_rural_assimilation <- voted_parties_rural_assimilation %>% group_by(epoch) %>%
+  mutate(blau_index = 1-(sum(prop^2)))
+
+ggplot(blau_index_data_rural_assimilation, aes(x=epoch,y= blau_index))+
+  geom_line(linewidth = .7) + ylim(0.4,0.7) +theme_bw()
+
+ggsave("blau_index_rural_assimilation_new.png", dpi = 95)
+
+
+
+
+ggplot(voted_parties_rural_assimilation, aes(x=epoch, y = prop, group = voted_party_cd, color = voted_party_cd))+  geom_line(linewidth = .7)  +theme_bw()  + ylim(.25,.45)+
+  labs(title="Change in Partisan Affiliation: Rural Neighborhood", y = "Percentage", x = "Epoch", color = "Party Affiliation") + 
+  scale_color_manual(values = c("DEM" = "blue", "REP" = "red", "UNA" = "purple"))+
+  ylim(0,0.8) +theme_bw()
+
+
+ggsave("voted_parties_rural_assimilation.png", dpi = 95)
+
+
+########## combining empirical and simulation data in one plot ###################
+
+
+blau_index_data_27915 <- blau_index_data %>% filter(zip_code== "27915", voted_party_cd == "DEM", election_lbl!= "2014-11-04")
+blau_index_data_27915$epoch <- c(0,100,200,300,400)
+
+
+ggplot()+
+  geom_line(data= blau_index_data_rural_assimilation, aes(x=epoch,y= blau_index, color = "Simulation Data")) +
+  geom_line(data=blau_index_data_27915, aes(x=epoch,y= blau_index, color = "Empirical Data"))+
+  scale_color_manual(values = c("Simulation Data" = "chartreuse3","Empirical Data" = "black"))+
+  theme_bw() +ylim(0.5,0.7) + labs(y="Blau Index", x = "Epoch", color = "Data")
+
+
+ggsave("blau_index_verification_rural.assimilation.png", dpi = 95)
+
+
+##### Entropy ####
+
+nc_stats_ruca_entropy <- nc_stats_zipcode %>%
+  group_by(zip_code, election_lbl) %>%
+  summarise(entropy = -sum(perc * log(perc)))
+
+entropy_data_27915 <- nc_stats_ruca_entropy %>% filter(zip_code== "27915", election_lbl!= "2014-11-04")
+entropy_data_27915$epoch <- c(0,100,200,300,400)
+
+
+entropy_data_rural_assimilation <- voted_parties_rural_assimilation %>% group_by(epoch) %>%
+  mutate(entropy = -sum(prop * log(prop)))
+
+
+ggplot()+
+  geom_line(data= entropy_data_rural_assimilation, aes(x=epoch,y= entropy, color = "Simulation Data")) +
+  geom_line(data=entropy_data_27915, aes(x=epoch,y= entropy, color = "Empirical Data"))+
+  scale_color_manual(values = c("Simulation Data" = "chartreuse3","Empirical Data" = "black"))+
+  theme_bw() +ylim(0.8,1.2) + labs(y="Entropy", x = "Epoch", color = "Data")
+
+
+
+ggsave("entropy_verification_rural.png", dpi = 95)
+
+
+### voted parties ##
+
+voted_parties_data_27915 <- nc_stats_zipcode %>% filter(zip_code== "27915", election_lbl!= "2014-11-04")
+voted_parties_data_27915 <- voted_parties_data_27915 %>% mutate(epoch = case_when(election_lbl == "2016-11-08" ~ 0,
+                                                                                  election_lbl == "2018-11-06" ~ 100,
+                                                                                  election_lbl == "2020-11-03" ~ 200,
+                                                                                  election_lbl == "2022-11-08" ~ 300,
+                                                                                  election_lbl == "2024-07-25" ~ 400))
+
+
+ggplot()+
+  geom_line(data = voted_parties_rural_assimilation, aes(x=epoch, y = prop, group = voted_party_cd, color = voted_party_cd, linetype = "Simulation Data")) +
+  geom_line(data=voted_parties_data_27915, aes(x=epoch,y= perc,group = voted_party_cd, color = voted_party_cd, linetype = "Empirical Data"))+
+  scale_color_manual(values = c("DEM" = "blue", "REP" = "red", "UNA" = "purple", "GRE" = "green"))+
+  scale_linetype_manual(values = c("Simulation Data" = "longdash","Empirical Data" = "solid"))+
+  theme_bw()+ labs(y="Blau Index", x = "Epoch", color = "Party", linetype = "Data")
+
+
+ggsave("voted_parties_verification_rural.png", dpi = 95)
+
+
+##############################
+#### Plot voting probabilities
+###############################
+
+vote_probs_rural_assimilation <-interaction_assimilation_epoch_rural %>%
+  tidyr::pivot_wider(names_from = party, values_from = vote_prob) 
+
+
+# Plot vote probabilities over time for each party
+ggplot(vote_probs_rural_assimilation, aes(x = epoch)) +
+  geom_smooth(aes(y = DEM, color = "DEM")) +
+  geom_smooth(aes(y = REP, color = "REP")) +
+  geom_smooth(aes(y = UNA, color = "UNA")) +
+  #geom_smooth(aes(y = NLB, color = "NLB")) +
+  labs(title = "Vote Probabilities Over Time: Rural Neighborhood",
+       x = "Epoch",
+       y = "Vote Probability",
+       color = "Party") +
+  scale_color_manual(values = c("DEM" = "blue", "REP" = "red", "UNA" = "purple"))+
+  ylim(0,1)+
+  theme_bw()
+
+ggsave("vote_probs_rural_assimilation.png", dpi = 95)
+
+
+
+
+#################################
+#### Plot individual changes
+#################################
+
+
+epoch1_voting_rural <- interaction_epoch_assimilation_rural %>% filter(epoch ==1) %>% dplyr::select(agent, voted_party_cd)
+epoch1_voting_rural <- unique(epoch1_voting_rural)
+
+table(epoch1_voting_rural$voted_party_cd)
+
+
+epoch400_voting_rural <- interaction_epoch_assimilation_rural %>% filter(epoch ==400) %>% dplyr::select(agent, voted_party_cd)
+epoch400_voting_rural <- unique(epoch400_voting_rural)
+
+table(epoch400_voting_rural$voted_party_cd)
+
+
+```
+
+
+
+### Excluding Context Parameter: \$C\$ and \$p\$ for Rural Model:
+
+```{r}
+
+
+interaction_rural_no_context_parameter <- updateVoteProbability_15(
+    geo_nc_27915_abm_small,
+    proxmat2_27915,
+    mu = 0.01,
+    total_attributes = 3,
+    epochs = 400,
+    proximity_threshold = 0.05,
+    p = 1,
+    C = 1,
+    knn_27915,
+    lambda = 1.3
+  )
+
+```
+
+
+
+### Including Context Parameter \$C\$ and \$p\$ for Urban Model: 
+
+```{r}
+
+interaction_urban_with_rural_parameter <- updateVoteProbability_15_urban(geo_nc_28203_abm_small, proxmat2_28203, 
+                                                                     mu = 0.005, total_attributes = 3, epochs = 400, 
+                                                                     proximity_threshold = 0.05, p = 1.5, 
+                                                                     C = 1.1,  knn_28203,  lambda = 1.7)
+
+```
+
+
+
+
