@@ -3,6 +3,75 @@
 
 
 
+###################################################
+########## Similarity between Agents ##############
+###################################################
+
+
+dem_sim <- sum(
+  agents$age_binned_factor[ego] == agents$age_binned_factor[alter], 
+  agents$race_code_factor[ego] == agents$race_code_factor[alter], 
+  agents$gender_code_factor[ego] == agents$gender_code_factor[alter]
+) / total_attributes
+
+opin_attrs <- c("DEM_prob", "UNA_prob", "LIB_prob", "GRE_prob", "REP_prob")
+opin_diffs <- abs(agents[ego, opin_attrs, with = FALSE] - agents[alter, opin_attrs, with = FALSE])
+opin_sim <- sum(1 - opin_diffs) / length(opin_attrs)
+
+sim_ij <- (dem_sim + opin_sim) / 2
+
+
+
+
+
+###################################################
+## Compute number of interactions and interaction partners
+###################################################
+
+for (ego in 1:num_agents) {
+  # Randomly assign the number of interactions for this agent for this day using a Poisson distribution
+  num_interactions <- rpois(1, lambda = lambda)
+  num_interactions <- min(num_interactions, 7)  # Ensure the value does not exceed 7
+  
+  # If no interactions, skip to the next agent
+  if (num_interactions == 0) next
+  
+  potential_alters <- potential_alters_list[[ego]]
+  
+  if (length(potential_alters) > 0) {
+    for (interaction in 1:num_interactions) {
+      alter <- sample(potential_alters, 1)
+      
+      if (ego != alter) {
+        interaction_prob <- proximity_matrix[ego, alter]
+        party_diff <- ifelse(agents$voted_party_cd[ego] == agents$voted_party_cd[alter], 0, 1)
+      }
+      }
+    }
+  }
+
+
+
+###################################################
+# Calculate Blau Index for each agent using k-NN #
+###################################################
+
+
+party <- agents$voted_party_cd  # Extract party affiliation
+agents$Blau_party <- NA 
+
+for (i in 1:num_agents) {
+  neighbors_indices <- knn_matrix$nn.index[i, ]
+  neighbors_parties <- party[neighbors_indices]
+  
+  party_proportions <- table(neighbors_parties) / length(neighbors_indices)
+  party_proportions <- as.numeric(party_proportions)  # Convert to numeric
+  
+  blau_index <- 1 - sum(party_proportions^2)
+  agents$Blau_party[i] <- blau_index
+}
+
+
 
 ###################################################
 ###### Calculate Partisan Outgroup Exposure #######
